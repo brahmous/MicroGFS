@@ -1,0 +1,4 @@
+protoc -I ./protos --grpc_out=./generated/ --plugin=protoc-gen-grpc=/home/nitro/.local/bin/grpc_cpp_plugin ./protos/GFSMasterService.proto
+
+protoc -I ./protos/ --cpp_out=./generated/ ./protos/GFSMasterService.proto
+

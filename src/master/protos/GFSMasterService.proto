@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package GFSMaster;
+
+message ChunkServerIdentifier {
+  string ip = 1;
+  uint32 port = 2;
+}
+
+/**/
+message RegisterChunkServerRequest {
+  ChunkServerIdentifier server_info = 1;
+}
+
+message RegisterChunkServerResponse {
+  bool acknowledged = 1;
+  string ack = 2;
+}
+
+service ChunkServerService {
+  rpc RegisterChunkServer(RegisterChunkServerRequest) returns (RegisterChunkServerResponse) {}
+}

@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package GFSChunkServer;
+
+message ChunkMetadata {
+  uint64 handle = 1;
+  uint32 chunk_size = 2;
+}
+
+message UploadChunkMetadataRequest {}
+// message UploadChunkMetadataResponse {}
+
+service ChunkServerService {
+  rpc UploadChunkMetadata(UploadChunkMetadataRequest) returns (stream ChunkMetadata) {}
+}
+
+// bug in lsp when you add semicolon after } and save it breaks.

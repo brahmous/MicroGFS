@@ -1,4 +1,6 @@
 third_party/
-generated/*
+src/*/generated/*
 build/
 .vscode/
+.cache
+NOTES.md
