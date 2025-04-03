@@ -14,7 +14,6 @@ message RegisterChunkServerRequest {
 
 message RegisterChunkServerResponse {
   bool acknowledged = 1;
-  string ack = 2;
 }
 
 service ChunkServerService {

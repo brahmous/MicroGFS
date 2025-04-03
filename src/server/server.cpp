@@ -88,16 +88,30 @@ public:
 		return new Writer(chunk_descriptor_list_);
 	}
 
+	grpc::ServerUnaryReactor* HeartBeat(
+      grpc::CallbackServerContext* context,
+			const GFSChunkServer::HeartBeatRequest* request,
+			GFSChunkServer::HeartBeatResponse* response)
+	override
+	{ 
+		MESSAGE("HEARTBEAT...");
+		response->set_extend_lease(true);
+		auto * reactor = context->DefaultReactor();
+		reactor->Finish(grpc::Status::OK);
+		return reactor;
+	}
+
 private:
 	std::shared_ptr<std::vector<ChunkDescriptor>> chunk_descriptor_list_;
 };
+
 
 class ChunkServer {
 public:
 	ChunkServer(const ServerInfo& _server_info):
 		chunks_{std::make_shared<std::vector<ChunkDescriptor>>()},
 		server_info {_server_info},
-		service_{chunks_},
+		chunk_server_service_{chunks_},
 		stub_{
 			GFSMaster::ChunkServerService::NewStub(
 				grpc::CreateChannel(server_info.master_ip_port_string(),
@@ -106,7 +120,7 @@ public:
 		load_chunks_from_filesystem();
 		grpc::ServerBuilder builder;
 		builder.AddListeningPort(server_info.my_ip_port_string(), grpc::InsecureServerCredentials());
-		builder.RegisterService(&service_);
+		builder.RegisterService(&chunk_server_service_);
 		server_ = std::unique_ptr<grpc::Server>(builder.BuildAndStart());
 	}
 
@@ -168,7 +182,7 @@ private:
 	/* Stub */
 	std::unique_ptr<GFSMaster::ChunkServerService::Stub> stub_;
 	/* Services */ 
-	ChunkServerServiceImplementation service_;
+	ChunkServerServiceImplementation chunk_server_service_;
 	/* Server */
 	std::unique_ptr<grpc::Server> server_;
 };
@@ -177,14 +191,13 @@ int main(int argc, char *argv[])
 {
 
 	if (argc < 11) {
-		MESSAGE_END_EXIT("USAGE: ");
+		MESSAGE_END_EXIT("USAGE: ./server --ip <ipv4-address> --rpc-port <port> --tcp-port <port> --master-ip <ipv4-address> --master-port <port> ");
 	} 
 
 	ServerInfo server_info(argv+1, argc-1);
 	std::cout << server_info << "\n";
-
 	ChunkServer server(server_info);
-
+	/* Announce to the master */
 	server.Announce();
 	server.start();
 }

@@ -83,30 +83,36 @@ private:
 	bool done_ = false;
 };
 
-void heartbeat_handler(GFSChunkServer::ChunkServerService::Stub * stub) {
-		//sleep(2);
-		ChunkMetadataReader reader(stub);
-		grpc::Status status = reader.Await();
+//void heartbeat_handler(GFSChunkServer::ChunkServerService::Stub * stub) {
+void heartbeat_handler(ChunkServerController * controller) {
+	//sleep(2);
+	ChunkMetadataReader reader(controller->chunk_server_stub_.get());
+	grpc::Status status = reader.Await();
 
-		if(status.ok()) {
-			std::cout << "Reader is working\n";
-		} else {
-			std::cout << "Reader is not working\n";
-		}
-
-	/*
-		int count = 5;
-		while (--count > 0) {
-			std::cout << "Sleeping.....\n";
-			sleep(1);
+	if(status.ok()) {
+		std::cout << "Reader is working\n";
+	} else {
+		std::cout << "Reader is not working\n";
 	}
-*/
+	int count = 5;
+	while (--count > 0) {
+
+		grpc::ClientContext context;
+		GFSChunkServer::HeartBeatRequest request;
+		GFSChunkServer::HeartBeatResponse response;
+
+		std::cout << "Sleeping.....\n";
+		sleep(2);
+		MESSAGE("HEARTBEAT...");
+		controller->chunk_server_stub_->HeartBeat(&context, request, &response);
+		MESSAGE("here");
+		//MESSAGE("extend lease: " << (response.extend_lease() ? "true" : "false"));
+	}
 }
 
-
-class GFSMasterServer : public GFSMaster::ChunkServerService::CallbackService {
+class GFSMasterServerServiceImplementation : public GFSMaster::ChunkServerService::CallbackService {
 public:
-	GFSMasterServer (
+	GFSMasterServerServiceImplementation (
 		std::shared_ptr<std::vector<ChunkServerController>> chunk_servers_info,
 		std::shared_ptr<std::vector<std::thread>> chunk_servers_heartbeat_threads
 	): 
@@ -122,13 +128,14 @@ public:
 	{
 		ServerInfo server_info (request->server_info().ip(), request->server_info().port());
 		ChunkServerController& controller = chunk_servers_info_sp_->emplace_back(server_info);
+
 		chunk_servers_heartbeat_threads_sp_
 			->emplace_back(std::thread(
-				heartbeat_handler, controller.chunk_server_stub_.get()
+				heartbeat_handler, &controller
 			)); 
+
 		GFSMaster::RegisterChunkServerResponse res;
 		res.set_acknowledged(true);
-		res.set_ack("hellloo");
 
 		response->CopyFrom(res);
 
@@ -146,10 +153,9 @@ class MasterServer {
 public:
 	MasterServer(const ServerInfo & server_info): 
 		server_info(server_info),
-		chunk_servers_descriptors_{std::make_shared<std::vector<ChunkServerController>>()},
+		chunk_servers_controllers_{std::make_shared<std::vector<ChunkServerController>>()},
 		chunk_servers_heartbeat_threads_{std::make_shared<std::vector<std::thread>>()},
-		master_service_{chunk_servers_descriptors_,
-		chunk_servers_heartbeat_threads_} 
+		master_service_{chunk_servers_controllers_, chunk_servers_heartbeat_threads_} 
 	{
 		grpc::ServerBuilder builder_;
 		builder_.AddListeningPort(server_info.my_ip_port_string(), grpc::InsecureServerCredentials());
@@ -164,15 +170,13 @@ public:
 
 	~MasterServer(){
 		for(std::thread & th: *chunk_servers_heartbeat_threads_) {
-			if (th.joinable()) {
-				th.join();
-			}
+			th.join();
 		}
 	}
 
 private:
 	/*Chunk Servers Data*/
-	std::shared_ptr<std::vector<ChunkServerController>> chunk_servers_descriptors_; 
+	std::shared_ptr<std::vector<ChunkServerController>> chunk_servers_controllers_; 
 	std::shared_ptr<std::vector<std::thread>> chunk_servers_heartbeat_threads_;
 
 	/*Service offered by the master to the chunk server*/
@@ -180,7 +184,7 @@ private:
 	std::unique_ptr<grpc::Server> server_;
 
 	/* Services */
-	GFSMasterServer master_service_;
+	GFSMasterServerServiceImplementation master_service_;
 
 	/*Service offered by the chunk server to the client*/
 	// dictionary
@@ -190,7 +194,7 @@ int main(int argc, char * argv[])
 {
 
 	if (argc < 5 or argc > 5) {
-		MESSAGE_END_EXIT("USAGE: ");
+		MESSAGE_END_EXIT("USAGE: ./server --ip <ipv4-address> --rpc-port <port> --tcp-port <port> --master-ip <ipv4-address> --master-port <port>");
 	}
 
 	ServerInfo server_info(argv+1, argc-1);
@@ -199,6 +203,5 @@ int main(int argc, char * argv[])
 	MESSAGE("SERVER INFO");
 	MESSAGE(server_info);
 	master.listen();
-
 }
 

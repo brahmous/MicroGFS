@@ -10,8 +10,15 @@ message ChunkMetadata {
 message UploadChunkMetadataRequest {}
 // message UploadChunkMetadataResponse {}
 
+message HeartBeatRequest {}
+
+message HeartBeatResponse {
+  bool extend_lease = 1;
+}
+
 service ChunkServerService {
   rpc UploadChunkMetadata(UploadChunkMetadataRequest) returns (stream ChunkMetadata) {}
+  rpc HeartBeat(HeartBeatRequest) returns (HeartBeatResponse) {}
 }
 
 // bug in lsp when you add semicolon after } and save it breaks.
