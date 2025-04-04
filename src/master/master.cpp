@@ -23,28 +23,12 @@
 #include "generated/GFSMasterService.grpc.pb.h"
 #include "../server/generated/GFSChunkServer.grpc.pb.h"
 
-class ChunkServerController{
-public:
-	ChunkServerController(const tcp_rpc_server_descriptor_t& server_info):
-		server_info_{server_info}, 
-		chunk_server_stub_{
-			GFSChunkServer::ChunkServerService::NewStub(
-				grpc::CreateChannel(
-					grpc_connection_string<tcp_rpc_server_descriptor_t>(server_info_),
-					grpc::InsecureChannelCredentials()
-				)
-			)
-		}
-	{
-	}
-	tcp_rpc_server_descriptor_t server_info_;
-	std::unique_ptr<GFSChunkServer::ChunkServerService::Stub> chunk_server_stub_;
-};
-
+// Reader Wrapper: Reads chunk handles, size, etc.. (metadata)
 class ChunkMetadataReader: public grpc::ClientReadReactor<GFSChunkServer::ChunkMetadata> {
 public:
 
-	ChunkMetadataReader(GFSChunkServer::ChunkServerService::Stub * stub)
+	// TODO: pass argument for btree and push into it.
+	ChunkMetadataReader(GFSChunkServer::ChunkServerService::Stub * stub) 
 	{
 		stub->async()->UploadChunkMetadata(&context_, &req_, this);
 		StartRead(&chunk_metadata_);
@@ -83,33 +67,63 @@ private:
 	bool done_ = false;
 };
 
-//void heartbeat_handler(GFSChunkServer::ChunkServerService::Stub * stub) {
-void heartbeat_worker(ChunkServerController * controller) {
-	//sleep(2);
-	ChunkMetadataReader reader(controller->chunk_server_stub_.get());
-	grpc::Status status = reader.Await();
+class ChunkServerController {
+public:
+	ChunkServerController(const tcp_rpc_server_descriptor_t& server_info):
+		server_info_{server_info},
+		chunk_server_stub_{
+			GFSChunkServer::ChunkServerService::NewStub(
+				grpc::CreateChannel(
+					grpc_connection_string<tcp_rpc_server_descriptor_t>(server_info_),
+					grpc::InsecureChannelCredentials()
+				)
+			)
+		}
+	{}
 
-	if(status.ok()) {
-		std::cout << "Reader is working\n";
-	} else {
-		std::cout << "Reader is not working\n";
+	void ReadChunkMetadata()
+	{
+		ChunkMetadataReader reader = ChunkMetadataReader(chunk_server_stub_.get());
+		grpc::Status status = reader.Await();
+
+		if ( status.ok() ) {
+			MESSAGE("Finished reading handles");
+		} else {
+			MESSAGE("Problems reading");
+		}
 	}
-	int count = 5;
-	while (--count > 0) {
 
+	void HeartBeat() 
+	{
 		grpc::ClientContext context;
 		GFSChunkServer::HeartBeatRequest request;
 		GFSChunkServer::HeartBeatResponse response;
+		chunk_server_stub_->HeartBeat(&context, request, &response);
+	}
 
+private:
+	tcp_rpc_server_descriptor_t server_info_;
+	std::unique_ptr<GFSChunkServer::ChunkServerService::Stub> chunk_server_stub_;
+};
+
+
+/* Thread that periodically sleeps and pings chunk servers for heartbeat messages */
+//void heartbeat_handler(GFSChunkServer::ChunkServerService::Stub * stub) {
+void heartbeat_worker(ChunkServerController * controller) {
+	sleep(2);
+	controller->ReadChunkMetadata();
+	int count = 5;
+	while (--count > 0) {
 		std::cout << "Sleeping.....\n";
 		sleep(2);
 		MESSAGE("HEARTBEAT...");
-		controller->chunk_server_stub_->HeartBeat(&context, request, &response);
+		controller->HeartBeat();
 		MESSAGE("here");
 		//MESSAGE("extend lease: " << (response.extend_lease() ? "true" : "false"));
 	}
 }
 
+/* Service: Master RPC server to register chunk servers */
 class GFSMasterServerServiceImplementation : public GFSMaster::ChunkServerService::CallbackService {
 public:
 	GFSMasterServerServiceImplementation (
@@ -132,14 +146,12 @@ public:
 		chunk_server_info.tcp_port = request->server_info().tcp_port();
 
 		ChunkServerController& controller = chunk_server_controllers_->emplace_back(chunk_server_info);
-
 		chunk_servers_heartbeat_threads_sp_->emplace_back(std::thread(heartbeat_worker, &controller)); 
 
 		GFSMaster::RegisterChunkServerResponse res;
 		res.set_acknowledged(true);
 
 		response->CopyFrom(res);
-
 		auto* reactor = context->DefaultReactor();
 		reactor->Finish(grpc::Status::OK);
 		return reactor;
@@ -165,11 +177,13 @@ public:
 		server_ = std::unique_ptr(builder_.BuildAndStart());
 	}
 
-	void listen() {
+	void listen()
+	{
 		server_->Wait();
 	} 
 
-	~MasterServer(){
+	~MasterServer()
+	{
 		for(std::thread & th: *chunk_servers_heartbeat_threads_) {
 			th.join();
 		}
@@ -198,7 +212,6 @@ int main(int argc, char * argv[])
 		MESSAGE_END_EXIT("USAGE: ./server --ip <ipv4-address> --rpc-port <port> --tcp-port <port> --master-ip <ipv4-address> --master-port <port>");
 	}
 
-	
 	rpc_server_descriptor_t master_server_info = parse_cli_args(argv+1, argc-1);   
 	MasterServer master(master_server_info);
 	MESSAGE(master_server_info);
