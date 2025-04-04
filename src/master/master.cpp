@@ -17,27 +17,27 @@
 #include <unistd.h>
 #include <vector>
 
-#include "../main.h"
-#include "headers/cli-args-parser.h"
+#include "../headers/main.h"
+#include "utils.h"
 #include "generated/GFSMasterService.pb.h"
 #include "generated/GFSMasterService.grpc.pb.h"
 #include "../server/generated/GFSChunkServer.grpc.pb.h"
 
 class ChunkServerController{
 public:
-	ChunkServerController(const ServerInfo& server_info):
+	ChunkServerController(const tcp_rpc_server_descriptor_t& server_info):
 		server_info_{server_info}, 
 		chunk_server_stub_{
 			GFSChunkServer::ChunkServerService::NewStub(
 				grpc::CreateChannel(
-					server_info_.my_ip_port_string(),
+					grpc_connection_string<tcp_rpc_server_descriptor_t>(server_info_),
 					grpc::InsecureChannelCredentials()
 				)
 			)
 		}
 	{
 	}
-	ServerInfo server_info_;
+	tcp_rpc_server_descriptor_t server_info_;
 	std::unique_ptr<GFSChunkServer::ChunkServerService::Stub> chunk_server_stub_;
 };
 
@@ -84,7 +84,7 @@ private:
 };
 
 //void heartbeat_handler(GFSChunkServer::ChunkServerService::Stub * stub) {
-void heartbeat_handler(ChunkServerController * controller) {
+void heartbeat_worker(ChunkServerController * controller) {
 	//sleep(2);
 	ChunkMetadataReader reader(controller->chunk_server_stub_.get());
 	grpc::Status status = reader.Await();
@@ -116,7 +116,7 @@ public:
 		std::shared_ptr<std::vector<ChunkServerController>> chunk_servers_info,
 		std::shared_ptr<std::vector<std::thread>> chunk_servers_heartbeat_threads
 	): 
-		chunk_servers_info_sp_{chunk_servers_info},
+		chunk_server_controllers_{chunk_servers_info},
 		chunk_servers_heartbeat_threads_sp_{chunk_servers_heartbeat_threads}
 	{}
 
@@ -126,13 +126,14 @@ public:
 					GFSMaster::RegisterChunkServerResponse* response
 	) override 
 	{
-		ServerInfo server_info (request->server_info().ip(), request->server_info().port());
-		ChunkServerController& controller = chunk_servers_info_sp_->emplace_back(server_info);
+		tcp_rpc_server_descriptor_t chunk_server_info;
+		chunk_server_info.ip = request->server_info().ip();
+		chunk_server_info.rpc_port = request->server_info().rpc_port();
+		chunk_server_info.tcp_port = request->server_info().tcp_port();
 
-		chunk_servers_heartbeat_threads_sp_
-			->emplace_back(std::thread(
-				heartbeat_handler, &controller
-			)); 
+		ChunkServerController& controller = chunk_server_controllers_->emplace_back(chunk_server_info);
+
+		chunk_servers_heartbeat_threads_sp_->emplace_back(std::thread(heartbeat_worker, &controller)); 
 
 		GFSMaster::RegisterChunkServerResponse res;
 		res.set_acknowledged(true);
@@ -145,20 +146,20 @@ public:
 	}
 
 	private:
-	std::shared_ptr<std::vector<ChunkServerController>> chunk_servers_info_sp_;
+	std::shared_ptr<std::vector<ChunkServerController>> chunk_server_controllers_;
 	std::shared_ptr<std::vector<std::thread>> chunk_servers_heartbeat_threads_sp_;
 };
 
 class MasterServer {
 public:
-	MasterServer(const ServerInfo & server_info): 
-		server_info(server_info),
+	MasterServer(const rpc_server_descriptor_t & server_info): 
+		server_info_(server_info),
 		chunk_servers_controllers_{std::make_shared<std::vector<ChunkServerController>>()},
 		chunk_servers_heartbeat_threads_{std::make_shared<std::vector<std::thread>>()},
 		master_service_{chunk_servers_controllers_, chunk_servers_heartbeat_threads_} 
 	{
 		grpc::ServerBuilder builder_;
-		builder_.AddListeningPort(server_info.my_ip_port_string(), grpc::InsecureServerCredentials());
+		builder_.AddListeningPort(grpc_connection_string(server_info), grpc::InsecureServerCredentials());
 		//master_service_ = GFSMasterServer(chunk_servers_descriptors_, chunk_servers_heartbeat_threads_);
 		builder_.RegisterService(&master_service_);
 		server_ = std::unique_ptr(builder_.BuildAndStart());
@@ -180,7 +181,7 @@ private:
 	std::shared_ptr<std::vector<std::thread>> chunk_servers_heartbeat_threads_;
 
 	/*Service offered by the master to the chunk server*/
-	ServerInfo server_info;
+	rpc_server_descriptor_t server_info_;
 	std::unique_ptr<grpc::Server> server_;
 
 	/* Services */
@@ -197,11 +198,10 @@ int main(int argc, char * argv[])
 		MESSAGE_END_EXIT("USAGE: ./server --ip <ipv4-address> --rpc-port <port> --tcp-port <port> --master-ip <ipv4-address> --master-port <port>");
 	}
 
-	ServerInfo server_info(argv+1, argc-1);
-	MasterServer master(server_info);
-
-	MESSAGE("SERVER INFO");
-	MESSAGE(server_info);
+	
+	rpc_server_descriptor_t master_server_info = parse_cli_args(argv+1, argc-1);   
+	MasterServer master(master_server_info);
+	MESSAGE(master_server_info);
 	master.listen();
 }
 

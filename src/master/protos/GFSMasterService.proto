@@ -4,7 +4,8 @@ package GFSMaster;
 
 message ChunkServerIdentifier {
   string ip = 1;
-  uint32 port = 2;
+  uint32 tcp_port = 3;
+  uint32 rpc_port = 2;
 }
 
 /**/

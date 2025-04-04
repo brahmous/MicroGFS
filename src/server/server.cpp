@@ -11,9 +11,12 @@
 #include <grpcpp/support/status.h>
 #include <memory>
 #include <mutex>
+#include <netdb.h>
 #include <vector>
-#include "../main.h"
-#include "./headers/cli-args-parser.h"
+
+#include "../headers/main.h"
+#include "./utils.h"
+
 #include "../master/generated/GFSMasterService.grpc.pb.h"
 
 #include "generated/GFSChunkServer.grpc.pb.h"
@@ -30,12 +33,12 @@ class ChunkServerServiceImplementation final:
 public:
 	ChunkServerServiceImplementation (std::shared_ptr<std::vector<ChunkDescriptor>> chunk_descriptor_list): 
 		chunk_descriptor_list_{chunk_descriptor_list} 
-	{
-	}
+	{}
 
 	grpc::ServerWriteReactor< GFSChunkServer::ChunkMetadata>* 
 	UploadChunkMetadata(grpc::CallbackServerContext* context,
-										 	const GFSChunkServer::UploadChunkMetadataRequest* request) override
+										 	const GFSChunkServer::UploadChunkMetadataRequest* request)
+	override
 	{ 
 		class Writer : public grpc::ServerWriteReactor<GFSChunkServer::ChunkMetadata> {
 		public:
@@ -101,6 +104,47 @@ public:
 		return reactor;
 	}
 
+	grpc::ServerUnaryReactor* AssignPrimary(
+      grpc::CallbackServerContext* context,
+			const GFSChunkServer::AssignPrimaryRequest* request, 
+			GFSChunkServer::AssignPrimaryResponse* response)
+	override
+	{
+		std::atomic<int> counter = 0;
+		// set lease in local in memory chunk structure
+		MESSAGE("Setting local lease");
+		// forward the lease to the secondaries
+		MESSAGE("client ip: " << request->client_server().ip());
+		MESSAGE("client port: " << request->client_server().port());
+
+		for (int i=0; i<request->secondary_servers().size(); ++i) {
+			MESSAGE("secondary ip: " << request->secondary_servers(i).ip());
+			MESSAGE("secondary port: " << request->secondary_servers(i).port());
+		}
+		// responde with acknowledegement
+		//
+		response->set_acknowledgment(true);
+		auto* reactor = context->DefaultReactor();
+		reactor->Finish(grpc::Status::OK);
+		return reactor;
+	}
+
+  grpc::ServerUnaryReactor* AssignSecondary(
+      grpc::CallbackServerContext* context,
+			const GFSChunkServer::AssignSecondaryRequest* request,
+			GFSChunkServer::AssignSecondaryResponse* response) override 
+	{ 
+		MESSAGE("Setting local lease");
+
+		MESSAGE("client ip: " << request->client_server().ip());
+		MESSAGE("client port: " << request->client_server().port());
+
+		response->set_acknowledgment(true);
+		auto* reactor = context->DefaultReactor();
+		reactor->Finish(grpc::Status::OK);
+		return reactor;
+	}
+
 private:
 	std::shared_ptr<std::vector<ChunkDescriptor>> chunk_descriptor_list_;
 };
@@ -108,18 +152,18 @@ private:
 
 class ChunkServer {
 public:
-	ChunkServer(const ServerInfo& _server_info):
-		chunks_{std::make_shared<std::vector<ChunkDescriptor>>()},
-		server_info {_server_info},
-		chunk_server_service_{chunks_},
+	ChunkServer(const chunkserver_master_connection_descriptor_t& _server_info):
+		chunk_descriptor_list_{std::make_shared<std::vector<ChunkDescriptor>>()},
+		chunkserver_master_connection_info_ {_server_info},
+		chunk_server_service_{chunk_descriptor_list_},
 		stub_{
 			GFSMaster::ChunkServerService::NewStub(
-				grpc::CreateChannel(server_info.master_ip_port_string(),
+				grpc::CreateChannel(grpc_connection_string<rpc_server_descriptor_t>(chunkserver_master_connection_info_.master),
 				grpc::InsecureChannelCredentials()))}
 	{
 		load_chunks_from_filesystem();
 		grpc::ServerBuilder builder;
-		builder.AddListeningPort(server_info.my_ip_port_string(), grpc::InsecureServerCredentials());
+		builder.AddListeningPort(grpc_connection_string(chunkserver_master_connection_info_.chunk_server), grpc::InsecureServerCredentials());
 		builder.RegisterService(&chunk_server_service_);
 		server_ = std::unique_ptr<grpc::Server>(builder.BuildAndStart());
 	}
@@ -133,8 +177,8 @@ public:
 		bool result;
 
 		GFSMaster::RegisterChunkServerRequest request;
-		request.mutable_server_info()->set_ip(server_info.my_ip());
-		request.mutable_server_info()->set_port(server_info.my_rpc_port());
+		request.mutable_server_info()->set_ip(chunkserver_master_connection_info_.chunk_server.ip);
+		request.mutable_server_info()->set_rpc_port(chunkserver_master_connection_info_.chunk_server.rpc_port);
 
 		GFSMaster::RegisterChunkServerResponse response;
 
@@ -149,7 +193,6 @@ public:
 				} else {
 					ret = false;
 				}
-
 				std::lock_guard<std::mutex> lock(mu);
 				result = ret;
 				done = true;
@@ -170,21 +213,27 @@ private:
 		for (auto const& directory_entry: std::filesystem::directory_iterator(chunks_folder)) {
 			std::string path = directory_entry.path();
 			ChunkDescriptor desc {path.substr(path.rfind("/")+1, path.size() - path.rfind("/")), directory_entry.file_size()}; 
-			chunks_->push_back(desc);
+			chunk_descriptor_list_->push_back(desc);
 		}
-		chunks_->shrink_to_fit();
+		chunk_descriptor_list_->shrink_to_fit();
 	}
 
 private:
-	std::shared_ptr<std::vector<ChunkDescriptor>> chunks_;
-	/* Server Info */
-	ServerInfo server_info;
+	std::shared_ptr<std::vector<ChunkDescriptor>> chunk_descriptor_list_;
+	/* ChunkServer-Master Connection Info */
+	chunkserver_master_connection_descriptor_t chunkserver_master_connection_info_;
 	/* Stub */
 	std::unique_ptr<GFSMaster::ChunkServerService::Stub> stub_;
 	/* Services */ 
 	ChunkServerServiceImplementation chunk_server_service_;
 	/* Server */
 	std::unique_ptr<grpc::Server> server_;
+
+	/* std::shared_ptr<std::vector<ServerController>> */
+	/* 
+	 * primary queues writes when it gets a write request from the client it checks the order
+	 * the secondaries don't check the oerder
+	 * What's the best data structure */
 };
 
 int main(int argc, char *argv[])
@@ -194,10 +243,11 @@ int main(int argc, char *argv[])
 		MESSAGE_END_EXIT("USAGE: ./server --ip <ipv4-address> --rpc-port <port> --tcp-port <port> --master-ip <ipv4-address> --master-port <port> ");
 	} 
 
-	ServerInfo server_info(argv+1, argc-1);
-	std::cout << server_info << "\n";
-	ChunkServer server(server_info);
+	chunkserver_master_connection_descriptor_t chunkserver_master_connection_info = parse_cli_args(argv+1, argc-1);
+	std::cout << chunkserver_master_connection_info << "\n";
+
+	ChunkServer main_server(chunkserver_master_connection_info);
 	/* Announce to the master */
-	server.Announce();
-	server.start();
+	main_server.Announce();
+	main_server.start();
 }

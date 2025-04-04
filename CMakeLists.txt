@@ -11,19 +11,22 @@ find_package(gRPC CONFIG REQUIRED)
 
 # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -frtti")
 #add_executable(server src/server/server.cpp generated/calculator.grpc.pb.cc generated/calculator.pb.cc)
-add_executable(server src/server/server.cpp
-											src/server/cli-args-parser.cpp
+
+add_executable(server src/server/utils.cpp
+											src/server/server.cpp
 											src/master/generated/GFSMasterService.grpc.pb.cc
 											src/master/generated/GFSMasterService.pb.cc
 											src/server/generated/GFSChunkServer.grpc.pb.cc
 											src/server/generated/GFSChunkServer.pb.cc)
+
 # add_executable(master master.cpp generated/calculator.grpc.pb.cc generated/calculator.pb.cc)
-add_executable(master src/master/master.cpp 
-											src/master/cli-args-parser.cpp
+add_executable(master src/master/utils.cpp
+											src/master/master.cpp
 											src/master/generated/GFSMasterService.grpc.pb.cc
 											src/master/generated/GFSMasterService.pb.cc
 											src/server/generated/GFSChunkServer.grpc.pb.cc
 											src/server/generated/GFSChunkServer.pb.cc)
+
 #add_executable(client src/client/client.cpp generated/calculator.grpc.pb.cc generated/calculator.pb.cc)
 add_executable(client src/client/client.cpp)
 
