@@ -1,8 +1,10 @@
+#include <algorithm>
 #include <condition_variable>
 #include <filesystem>
 #include <google/protobuf/message.h>
 #include <grpcpp/channel.h>
 
+#include <grpcpp/client_context.h>
 #include <grpcpp/create_channel.h>
 #include <grpcpp/security/credentials.h>
 #include <grpcpp/security/server_credentials.h>
@@ -12,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <netdb.h>
+#include <type_traits>
 #include <vector>
 
 #include "../headers/main.h"
@@ -25,6 +28,50 @@
 struct ChunkDescriptor {
 	std::string name;
 	std::size_t size;
+};
+
+class SecondaryChunkServerController {
+
+public:
+	SecondaryChunkServerController(const tcp_rpc_server_descriptor_t& server_info) : 
+	server_info_{server_info},
+	secondary_server_stub_{
+			GFSChunkServer::ChunkServerService::NewStub(
+				grpc::CreateChannel(
+					grpc_connection_string(server_info),
+					grpc::InsecureChannelCredentials()
+				)
+			)
+		}
+	{}
+
+	void assignSecondary(std::atomic<int>& counter, std::condition_variable& cv, std::mutex& mu, bool& acknowledged) {
+		grpc::ClientContext context;
+		GFSChunkServer::AssignSecondaryRequest req;
+		GFSChunkServer::AssignSecondaryResponse res;
+		secondary_server_stub_
+			->async()
+			->AssignSecondary(&context, &req, &res,
+				[&acknowledged, &mu, &cv, &counter, &res](grpc::Status status)
+			{
+				bool result;
+				if (!status.ok()) {
+					MESSAGE("NOT OK CALL TO SECONDARY");
+					result = false;
+				} else {
+						result = res.acknowledgment();
+				} 
+				--counter;
+				std::lock_guard<std::mutex> lock(mu);
+				acknowledged &= result;
+				cv.notify_one();
+			}
+		);
+	}
+
+private:
+	tcp_rpc_server_descriptor_t server_info_;
+	std::unique_ptr<GFSChunkServer::ChunkServerService::Stub> secondary_server_stub_;
 };
 
 class ChunkServerServiceImplementation final: 
@@ -42,6 +89,7 @@ public:
 	{ 
 		class Writer : public grpc::ServerWriteReactor<GFSChunkServer::ChunkMetadata> {
 		public:
+
 			Writer(std::shared_ptr<std::vector<ChunkDescriptor>> chunk_descriptor_list):
 				chunk_descriptor_list_{chunk_descriptor_list},
 				it_ {chunk_descriptor_list_->begin()}
@@ -110,20 +158,34 @@ public:
 			GFSChunkServer::AssignPrimaryResponse* response)
 	override
 	{
-		std::atomic<int> counter = 0;
+		std::atomic<int> counter = request->secondary_servers().size();
+		bool acknowledged = false;
+		std::mutex mu;
+		std::condition_variable cv;
+
 		// set lease in local in memory chunk structure
 		MESSAGE("Setting local lease");
 		// forward the lease to the secondaries
 		MESSAGE("client ip: " << request->client_server().ip());
-		MESSAGE("client port: " << request->client_server().port());
+		MESSAGE("client port: " << request->client_server().rpc_port());
+
+		tcp_rpc_server_descriptor_t server_info;
+		
+		std::vector <SecondaryChunkServerController> controllers;
 
 		for (int i=0; i<request->secondary_servers().size(); ++i) {
 			MESSAGE("secondary ip: " << request->secondary_servers(i).ip());
-			MESSAGE("secondary port: " << request->secondary_servers(i).port());
+			server_info.ip = request->secondary_servers(i).ip();
+			MESSAGE("secondary port: " << request->secondary_servers(i).rpc_port());
+			server_info.rpc_port = request->secondary_servers(i).rpc_port();
+			SecondaryChunkServerController& controller = controllers.emplace_back(server_info);
+			controller.assignSecondary(counter, cv, mu, acknowledged);
 		}
+
+		std::unique_lock<std::mutex> lock(mu);
+		cv.wait(lock, [&counter]{ return counter == 0; });
 		// responde with acknowledegement
-		//
-		response->set_acknowledgment(true);
+		response->set_acknowledgment(acknowledged);
 		auto* reactor = context->DefaultReactor();
 		reactor->Finish(grpc::Status::OK);
 		return reactor;
@@ -133,11 +195,11 @@ public:
       grpc::CallbackServerContext* context,
 			const GFSChunkServer::AssignSecondaryRequest* request,
 			GFSChunkServer::AssignSecondaryResponse* response) override 
-	{ 
+{ 
 		MESSAGE("Setting local lease");
 
 		MESSAGE("client ip: " << request->client_server().ip());
-		MESSAGE("client port: " << request->client_server().port());
+		MESSAGE("client port: " << request->client_server().rpc_port());
 
 		response->set_acknowledgment(true);
 		auto* reactor = context->DefaultReactor();

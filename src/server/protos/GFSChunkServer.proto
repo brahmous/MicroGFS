@@ -16,15 +16,21 @@ message HeartBeatResponse {
   bool extend_lease = 1;
 }
 
-message ServerIdentifier {
+message RpcServerIdentifier {
   string ip = 1;
-  uint32 port = 2;
+  uint32 rpc_port = 2;
+}
+
+message TcpRpcServerIdentifier {
+  string ip = 1;
+  uint32 tcp_port = 2;
+  uint32 rpc_port = 3;
 }
 
 message AssignPrimaryRequest {
   uint64 handle = 1;
-  ServerIdentifier client_server = 2;
-  repeated ServerIdentifier secondary_servers = 3;
+  RpcServerIdentifier client_server = 2;
+  repeated TcpRpcServerIdentifier secondary_servers = 3;
   string write_id = 4;
 }
 
@@ -34,7 +40,8 @@ message AssignPrimaryResponse {
 
 message AssignSecondaryRequest {
   uint64 handle = 1;
-  ServerIdentifier client_server = 2;
+  RpcServerIdentifier client_server = 2;
+  TcpRpcServerIdentifier forward_server = 3;
   string write_id = 4;
 }
 

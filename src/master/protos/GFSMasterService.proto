@@ -17,6 +17,18 @@ message RegisterChunkServerResponse {
   bool acknowledged = 1;
 }
 
+message WriteRequest {
+  string file_path = 1;
+  uint32 offset = 2;
+  uint32 data_size = 3;
+}
+
+message WriteResponse {
+  ChunkServerIdentifier primary_server = 1;
+  repeated ChunkServerIdentifier secondary_servers = 2;
+}
+
 service ChunkServerService {
   rpc RegisterChunkServer(RegisterChunkServerRequest) returns (RegisterChunkServerResponse) {}
+  rpc Write(WriteRequest) returns (WriteResponse) {}
 }

@@ -28,7 +28,10 @@ add_executable(master src/master/utils.cpp
 											src/server/generated/GFSChunkServer.pb.cc)
 
 #add_executable(client src/client/client.cpp generated/calculator.grpc.pb.cc generated/calculator.pb.cc)
-add_executable(client src/client/client.cpp)
+add_executable(client src/client/utils.cpp
+											src/client/client.cpp
+											src/master/generated/GFSMasterService.grpc.pb.cc
+											src/master/generated/GFSMasterService.pb.cc)
 
 # add_compile_options(-frtti -g)
 

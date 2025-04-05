@@ -28,6 +28,10 @@ typedef struct chunkserver_master_connection_descriptor_t {
 	rpc_server_descriptor_t master;
 } chunkserver_master_connection_descriptor_t;
 
+typedef struct client_master_connection_descriptor_t {
+	tcp_rpc_server_descriptor_t client;
+	rpc_server_descriptor_t master;
+} client_master_connection_descriptor_t;
 
 std::ostream& operator<<(std::ostream& out, const server_address_t& server_info); 
 

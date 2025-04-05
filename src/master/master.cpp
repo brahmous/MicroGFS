@@ -1,5 +1,7 @@
 #include <absl/strings/str_format.h>
+#include <algorithm>
 #include <condition_variable>
+#include <cstdint>
 #include <grpcpp/client_context.h>
 #include <grpcpp/create_channel.h>
 #include <grpcpp/security/credentials.h>
@@ -13,6 +15,7 @@
 #include <grpcpp/server_context.h>
 #include <memory>
 #include <mutex>
+#include <sys/types.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -101,6 +104,38 @@ public:
 		chunk_server_stub_->HeartBeat(&context, request, &response);
 	}
 
+	void AssignLease(const rpc_server_descriptor_t & client_info, 
+									uint64_t handle,
+									std::string write_id,
+									const std::vector<tcp_rpc_server_descriptor_t>& secondary_servers_info,
+									bool& acknowledged) {
+
+		grpc::ClientContext context;
+		GFSChunkServer::AssignPrimaryRequest request;
+
+		request.set_handle(handle);
+		request.set_write_id(write_id);
+
+		request.mutable_client_server()->set_ip(client_info.ip);
+		request.mutable_client_server()->set_rpc_port(client_info.rpc_port);
+	
+		for (const tcp_rpc_server_descriptor_t& secondary_info: secondary_servers_info) {
+			GFSChunkServer::TcpRpcServerIdentifier * secondary_info_ = request.add_secondary_servers();
+			secondary_info_->set_ip(secondary_info.ip);
+			secondary_info_->set_tcp_port(secondary_info.tcp_port);
+			secondary_info_->set_rpc_port(secondary_info.rpc_port);
+		}
+
+		GFSChunkServer::AssignPrimaryResponse response; 
+		// Async RPC CALL
+		chunk_server_stub_->AssignPrimary(&context, request, &response);
+		acknowledged = response.acknowledgment();
+	}
+
+	tcp_rpc_server_descriptor_t server_info() {
+		return server_info_;
+	}
+
 private:
 	tcp_rpc_server_descriptor_t server_info_;
 	std::unique_ptr<GFSChunkServer::ChunkServerService::Stub> chunk_server_stub_;
@@ -128,10 +163,12 @@ class GFSMasterServerServiceImplementation : public GFSMaster::ChunkServerServic
 public:
 	GFSMasterServerServiceImplementation (
 		std::shared_ptr<std::vector<ChunkServerController>> chunk_servers_info,
-		std::shared_ptr<std::vector<std::thread>> chunk_servers_heartbeat_threads
+		std::shared_ptr<std::vector<std::thread>> chunk_servers_heartbeat_threads,
+		const rpc_server_descriptor_t& server_info
 	): 
 		chunk_server_controllers_{chunk_servers_info},
-		chunk_servers_heartbeat_threads_sp_{chunk_servers_heartbeat_threads}
+		chunk_servers_heartbeat_threads_sp_{chunk_servers_heartbeat_threads},
+		server_info_ {server_info}
 	{}
 
 	grpc::ServerUnaryReactor* RegisterChunkServer (
@@ -157,9 +194,59 @@ public:
 		return reactor;
 	}
 
+  grpc::ServerUnaryReactor* Write(
+      grpc::CallbackServerContext* context,
+			const GFSMaster::WriteRequest* request,
+			GFSMaster::WriteResponse* response
+	) override
+	{ 
+		// Run the algorithm to select chunk servers and assign the primary passing to it the secondaries.
+		/*
+		 *oid AssignLease(const rpc_server_descriptor_t & client_info, 
+									uint64_t handle,
+									std::string write_id,
+									const std::vector<tcp_rpc_server_descriptor_t>& secondary_servers_info,
+									bool& acknowledged) {
+		 * */
+		bool acknowledged = false;
+		uint64_t handle = 2323234;
+		std::string write_id = "5s4f5s4fef4s5f45sd4f6er24s";
+		std::vector<tcp_rpc_server_descriptor_t> secondary_servers;
+
+		for (std::vector<ChunkServerController>::iterator 
+			it = chunk_server_controllers_->begin()+1;
+			it < chunk_server_controllers_->end();
+			++it) {
+			secondary_servers.push_back(it->server_info());
+		}
+
+		chunk_server_controllers_
+			->front()
+			.AssignLease(server_info_, handle, write_id, secondary_servers, acknowledged);
+
+		tcp_rpc_server_descriptor_t primary_info = chunk_server_controllers_->front().server_info();
+
+		// Write converters to convert structs to rpc types
+		response->mutable_primary_server()->set_ip(primary_info.ip);
+		response->mutable_primary_server()->set_tcp_port(primary_info.tcp_port);
+		response->mutable_primary_server()->set_rpc_port(primary_info.rpc_port);
+
+		for (const tcp_rpc_server_descriptor_t& server_info: secondary_servers) {
+			GFSMaster::ChunkServerIdentifier * server_info_ = response->add_secondary_servers();
+			server_info_->set_ip(server_info.ip);
+			server_info_->set_tcp_port(server_info.tcp_port);
+			server_info_->set_rpc_port(server_info.rpc_port);
+		}
+
+		auto* reactor = context->DefaultReactor();
+		reactor->Finish(grpc::Status::OK);
+		return reactor;
+	}
+
 	private:
 	std::shared_ptr<std::vector<ChunkServerController>> chunk_server_controllers_;
 	std::shared_ptr<std::vector<std::thread>> chunk_servers_heartbeat_threads_sp_;
+	rpc_server_descriptor_t server_info_;
 };
 
 class MasterServer {
@@ -168,7 +255,11 @@ public:
 		server_info_(server_info),
 		chunk_servers_controllers_{std::make_shared<std::vector<ChunkServerController>>()},
 		chunk_servers_heartbeat_threads_{std::make_shared<std::vector<std::thread>>()},
-		master_service_{chunk_servers_controllers_, chunk_servers_heartbeat_threads_} 
+		master_service_{
+			chunk_servers_controllers_,
+			chunk_servers_heartbeat_threads_, 
+			server_info_
+		} 
 	{
 		grpc::ServerBuilder builder_;
 		builder_.AddListeningPort(grpc_connection_string(server_info), grpc::InsecureServerCredentials());
