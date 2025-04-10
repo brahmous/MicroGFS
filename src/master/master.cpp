@@ -98,10 +98,12 @@ public:
 
 	void HeartBeat() 
 	{
+		MESSAGE("------------------ SENDING HEART BEAT ------------------");
 		grpc::ClientContext context;
 		GFSChunkServer::HeartBeatRequest request;
 		GFSChunkServer::HeartBeatResponse response;
-		chunk_server_stub_->HeartBeat(&context, request, &response);
+		MESSAGE("------------------ END SENDING HEART BEAT ------------------");
+		chunk_server_stub_.get()->HeartBeat(&context, request, &response);
 	}
 
 	void AssignLease(const rpc_server_descriptor_t & client_info, 
@@ -138,22 +140,23 @@ public:
 
 private:
 	tcp_rpc_server_descriptor_t server_info_;
-	std::unique_ptr<GFSChunkServer::ChunkServerService::Stub> chunk_server_stub_;
+	std::shared_ptr<GFSChunkServer::ChunkServerService::Stub> chunk_server_stub_;
 };
-
 
 /* Thread that periodically sleeps and pings chunk servers for heartbeat messages */
 //void heartbeat_handler(GFSChunkServer::ChunkServerService::Stub * stub) {
-void heartbeat_worker(ChunkServerController * controller) {
+void heartbeat_worker(ChunkServerController controller) {
+	//MESSAGE("controller POINTER: " << controller);
+	MESSAGE("hHHHHHHHHHHELLLOOJklll");
 	sleep(2);
-	controller->ReadChunkMetadata();
-	int count = 5;
+	controller.ReadChunkMetadata();
+	MESSAGE("[------------------]: POSITION :[------------------]");
+	int count = 100;
 	while (--count > 0) {
-		std::cout << "Sleeping.....\n";
+		MESSAGE("[LOG]: Sleeping for 2 seconds.");
 		sleep(2);
-		MESSAGE("HEARTBEAT...");
-		controller->HeartBeat();
-		MESSAGE("here");
+		MESSAGE("[LOG]: HEARTBEAT...");
+		controller.HeartBeat();
 		//MESSAGE("extend lease: " << (response.extend_lease() ? "true" : "false"));
 	}
 }
@@ -162,12 +165,12 @@ void heartbeat_worker(ChunkServerController * controller) {
 class GFSMasterServerServiceImplementation : public GFSMaster::ChunkServerService::CallbackService {
 public:
 	GFSMasterServerServiceImplementation (
-		std::shared_ptr<std::vector<ChunkServerController>> chunk_servers_info,
 		std::shared_ptr<std::vector<std::thread>> chunk_servers_heartbeat_threads,
+		std::shared_ptr<std::vector<ChunkServerController>> chunk_servers_controllers,
 		const rpc_server_descriptor_t& server_info
 	): 
-		chunk_server_controllers_{chunk_servers_info},
 		chunk_servers_heartbeat_threads_sp_{chunk_servers_heartbeat_threads},
+		chunk_server_controllers_{chunk_servers_controllers},
 		server_info_ {server_info}
 	{}
 
@@ -182,11 +185,22 @@ public:
 		chunk_server_info.rpc_port = request->server_info().rpc_port();
 		chunk_server_info.tcp_port = request->server_info().tcp_port();
 
-		ChunkServerController& controller = chunk_server_controllers_->emplace_back(chunk_server_info);
-		chunk_servers_heartbeat_threads_sp_->emplace_back(std::thread(heartbeat_worker, &controller)); 
+		MESSAGE("[LOG]: Chunk server requests registration. <<<<");
+		MESSAGE("[->]: Server Info: ");
+		MESSAGE("[->]: ip: " << chunk_server_info.ip);
+		MESSAGE("[->]: rpc port: " << chunk_server_info.rpc_port);
+		MESSAGE("[->]: tcp port: " << chunk_server_info.tcp_port);
+
+		MESSAGE("[LOG]: making controller.");
+		//ChunkServerController& controller = chunk_server_controllers_->emplace_back(chunk_server_info);
+		MESSAGE("[LOG]: Spawning Heartbeat Thread.");
+		chunk_servers_heartbeat_threads_sp_->emplace_back(std::thread(heartbeat_worker, ChunkServerController(chunk_server_info))); 
+		MESSAGE("[LOG]: Heartbeat Thread Spawned. ");
+		MESSAGE("[LOG]: THREAD POOL SIZE: " << chunk_servers_heartbeat_threads_sp_->size());
 
 		GFSMaster::RegisterChunkServerResponse res;
 		res.set_acknowledged(true);
+		MESSAGE("[LOG]: Registration Acknowledged.");
 
 		response->CopyFrom(res);
 		auto* reactor = context->DefaultReactor();
@@ -201,17 +215,23 @@ public:
 	) override
 	{ 
 		// Run the algorithm to select chunk servers and assign the primary passing to it the secondaries.
-		/*
-		 *oid AssignLease(const rpc_server_descriptor_t & client_info, 
-									uint64_t handle,
-									std::string write_id,
-									const std::vector<tcp_rpc_server_descriptor_t>& secondary_servers_info,
-									bool& acknowledged) {
-		 * */
+		MESSAGE("[LOG]: Write request received.");
+		MESSAGE("[LOG]: Write received info: ");
+		MESSAGE("[->]: File path: " << request->file_path());
+		MESSAGE("[->]: Data size: " << request->data_size());
+		MESSAGE("[->]: Offset: " << request->offset());
+
 		bool acknowledged = false;
-		uint64_t handle = 2323234;
+		uint64_t handle = 123456789;
 		std::string write_id = "5s4f5s4fef4s5f45sd4f6er24s";
+		
+		MESSAGE("[LOG]: Write request corresponding info: ");
+		MESSAGE("[->]: chunk handle: " << handle);
+		MESSAGE("[->]: write id: " << write_id);
+
 		std::vector<tcp_rpc_server_descriptor_t> secondary_servers;
+
+		MESSAGE("[LOG]: Write-secondary server list:");
 
 		for (std::vector<ChunkServerController>::iterator 
 			it = chunk_server_controllers_->begin()+1;
@@ -220,10 +240,22 @@ public:
 			secondary_servers.push_back(it->server_info());
 		}
 
+		int _log_count_ = 1; /*for logging only.*/
+		for(tcp_rpc_server_descriptor_t selected_secondary_info: secondary_servers) {
+			MESSAGE("[LOG]: Secondary Server: " << _log_count_);
+			MESSAGE("[->]: ip: " << selected_secondary_info.ip);
+			MESSAGE("[->]: tcp port: " << selected_secondary_info. tcp_port);
+			MESSAGE("[->]: rpc port: " << selected_secondary_info.rpc_port);
+		} 
+
+		MESSAGE("[LOG]: Lease Assignment Process Started.");
 		chunk_server_controllers_
 			->front()
 			.AssignLease(server_info_, handle, write_id, secondary_servers, acknowledged);
+		MESSAGE("[LOG]: Lease Assignment Process ended.");
 
+
+		// TODO: fix this - run an algorithm to select primary and secondaries and send them back to the client.
 		tcp_rpc_server_descriptor_t primary_info = chunk_server_controllers_->front().server_info();
 
 		// Write converters to convert structs to rpc types
@@ -240,6 +272,7 @@ public:
 
 		auto* reactor = context->DefaultReactor();
 		reactor->Finish(grpc::Status::OK);
+		MESSAGE("[LOG]: Response (chunk location) is sent back to the client.");
 		return reactor;
 	}
 
@@ -255,9 +288,9 @@ public:
 		server_info_(server_info),
 		chunk_servers_controllers_{std::make_shared<std::vector<ChunkServerController>>()},
 		chunk_servers_heartbeat_threads_{std::make_shared<std::vector<std::thread>>()},
-		master_service_{
-			chunk_servers_controllers_,
+		master_service_ {
 			chunk_servers_heartbeat_threads_, 
+			chunk_servers_controllers_,
 			server_info_
 		} 
 	{
@@ -266,6 +299,7 @@ public:
 		//master_service_ = GFSMasterServer(chunk_servers_descriptors_, chunk_servers_heartbeat_threads_);
 		builder_.RegisterService(&master_service_);
 		server_ = std::unique_ptr(builder_.BuildAndStart());
+		MESSAGE("[LOG]: Master server object constructed.");
 	}
 
 	void listen()
@@ -276,6 +310,7 @@ public:
 	~MasterServer()
 	{
 		for(std::thread & th: *chunk_servers_heartbeat_threads_) {
+			MESSAGE("[LOG]: Joining Heartbeat threads.");
 			th.join();
 		}
 	}
@@ -287,7 +322,7 @@ private:
 
 	/*Service offered by the master to the chunk server*/
 	rpc_server_descriptor_t server_info_;
-	std::unique_ptr<grpc::Server> server_;
+	std::shared_ptr<grpc::Server> server_;
 
 	/* Services */
 	GFSMasterServerServiceImplementation master_service_;
@@ -303,9 +338,18 @@ int main(int argc, char * argv[])
 		MESSAGE_END_EXIT("USAGE: ./server --ip <ipv4-address> --rpc-port <port> --tcp-port <port> --master-ip <ipv4-address> --master-port <port>");
 	}
 
+	MESSAGE("[LOG]: Parsing CLI args.");
 	rpc_server_descriptor_t master_server_info = parse_cli_args(argv+1, argc-1);   
+	MESSAGE("[LOG]: MASTER INFO: ");
+	MESSAGE("[->]: Master ip: " << master_server_info.ip);
+	MESSAGE("[->]: Master rpc-port: " << master_server_info.rpc_port);
+
+
+	MESSAGE("[LOG]: GFSMaster Service Construction Start: ");
 	MasterServer master(master_server_info);
-	MESSAGE(master_server_info);
+	MESSAGE("[LOG]: GFSMaster Service Construction end: ");
+	//MESSAGE(master_server_info);
+	MESSAGE("[LOG]: Master server waiting start: ");
 	master.listen();
 }
 

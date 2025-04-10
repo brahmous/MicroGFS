@@ -17,9 +17,12 @@ public:
 	MicroGFS (client_master_connection_descriptor_t connection_options)
 	: connection_options_{connection_options},
 	master_stub_{GFSMaster::ChunkServerService::NewStub(grpc::CreateChannel(grpc_connection_string<rpc_server_descriptor_t>(connection_options_.master), grpc::InsecureChannelCredentials()))}
-	{}
+	{
+		MESSAGE("[LOG]: connection options initialized.");
+		MESSAGE("[LOG]: master stub created.");
+	}
 
-	void write(std::string file_path, unsigned int offset);
+	void write(std::string file_path, unsigned int offset, unsigned int size);
 
 private:
 	client_master_connection_descriptor_t connection_options_;

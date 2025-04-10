@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package GFSClient;
+
+message AcknowledgeDataReceiptRequest {
+  string write_id = 1;
+}
+
+message AcknowledgeDataReceiptResponse {
+  bool acknowledgement_accepted = 1;
+}
+
+service GFSClientService {
+  rpc AcknowledgeDataReceipt(AcknowledgeDataReceiptRequest) returns (AcknowledgeDataReceiptResponse) {}
+}

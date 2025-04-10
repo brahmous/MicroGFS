@@ -49,11 +49,20 @@ message AssignSecondaryResponse {
   bool acknowledgment = 1;
 }
 
+message FlushRequest {
+  string write_id = 1;
+}
+
+message FlushResponse {
+  bool flushed = 1;
+}
+
 service ChunkServerService {
   rpc UploadChunkMetadata(UploadChunkMetadataRequest) returns (stream ChunkMetadata) {}
   rpc HeartBeat(HeartBeatRequest) returns (HeartBeatResponse) {}
   rpc AssignPrimary(AssignPrimaryRequest) returns (AssignPrimaryResponse) {}
   rpc AssignSecondary(AssignSecondaryRequest) returns (AssignSecondaryResponse) {}
+  rpc Flush(FlushRequest) returns (FlushResponse) {}
 }
 
 // bug in lsp when you add semicolon after } and save it breaks.

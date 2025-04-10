@@ -12,6 +12,10 @@
 #define MASTER_IP_FLAG 				"--master-ip"
 #define MASTER_PORT_FLAG 			"--master-port"
 
+/*
+ * TODO: too much duplication. refactor!
+ * */
+
 typedef struct tcp_rpc_server_descriptor_t {
 	std::string ip;
 	unsigned short int rpc_port;	
@@ -21,7 +25,7 @@ typedef struct tcp_rpc_server_descriptor_t {
 typedef struct  rpc_server_descriptor_t {
 	std::string ip;
 	unsigned short int rpc_port;
-} server_address_t;
+} rpc_server_descriptor_t;
 
 typedef struct chunkserver_master_connection_descriptor_t {
 	tcp_rpc_server_descriptor_t chunk_server;
@@ -33,6 +37,6 @@ typedef struct client_master_connection_descriptor_t {
 	rpc_server_descriptor_t master;
 } client_master_connection_descriptor_t;
 
-std::ostream& operator<<(std::ostream& out, const server_address_t& server_info); 
+std::ostream& operator<<(std::ostream& out, const rpc_server_descriptor_t& server_info); 
 
 #endif
