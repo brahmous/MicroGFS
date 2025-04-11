@@ -145,18 +145,18 @@ private:
 
 /* Thread that periodically sleeps and pings chunk servers for heartbeat messages */
 //void heartbeat_handler(GFSChunkServer::ChunkServerService::Stub * stub) {
-void heartbeat_worker(ChunkServerController controller) {
+void heartbeat_worker(ChunkServerController * controller) {
 	//MESSAGE("controller POINTER: " << controller);
 	MESSAGE("hHHHHHHHHHHELLLOOJklll");
 	sleep(2);
-	controller.ReadChunkMetadata();
+	controller->ReadChunkMetadata();
 	MESSAGE("[------------------]: POSITION :[------------------]");
 	int count = 100;
 	while (--count > 0) {
 		MESSAGE("[LOG]: Sleeping for 2 seconds.");
 		sleep(2);
 		MESSAGE("[LOG]: HEARTBEAT...");
-		controller.HeartBeat();
+		controller->HeartBeat();
 		//MESSAGE("extend lease: " << (response.extend_lease() ? "true" : "false"));
 	}
 }
@@ -192,9 +192,9 @@ public:
 		MESSAGE("[->]: tcp port: " << chunk_server_info.tcp_port);
 
 		MESSAGE("[LOG]: making controller.");
-		//ChunkServerController& controller = chunk_server_controllers_->emplace_back(chunk_server_info);
+		ChunkServerController& controller = chunk_server_controllers_->emplace_back(chunk_server_info);
 		MESSAGE("[LOG]: Spawning Heartbeat Thread.");
-		chunk_servers_heartbeat_threads_sp_->emplace_back(std::thread(heartbeat_worker, ChunkServerController(chunk_server_info))); 
+		chunk_servers_heartbeat_threads_sp_->emplace_back(std::thread(heartbeat_worker, std::addressof(controller))); 
 		MESSAGE("[LOG]: Heartbeat Thread Spawned. ");
 		MESSAGE("[LOG]: THREAD POOL SIZE: " << chunk_servers_heartbeat_threads_sp_->size());
 
@@ -254,12 +254,14 @@ public:
 			.AssignLease(server_info_, handle, write_id, secondary_servers, acknowledged);
 		MESSAGE("[LOG]: Lease Assignment Process ended.");
 
+		MESSAGE("[LOG]: ACKNOWLEDGED (" << (acknowledged ? "true" : "false") << ")" );
 
 		// TODO: fix this - run an algorithm to select primary and secondaries and send them back to the client.
 		tcp_rpc_server_descriptor_t primary_info = chunk_server_controllers_->front().server_info();
 
 		// Write converters to convert structs to rpc types
 		response->mutable_primary_server()->set_ip(primary_info.ip);
+		// response->mutable_primary_server()->set_ip("HEEEEEEEEEEEEEEEEELOOOOOOOOOOOOOOOOOOOOO THIS IS MY IPPPPPPPPPPPPPPP");
 		response->mutable_primary_server()->set_tcp_port(primary_info.tcp_port);
 		response->mutable_primary_server()->set_rpc_port(primary_info.rpc_port);
 
@@ -294,6 +296,7 @@ public:
 			server_info_
 		} 
 	{
+		chunk_servers_controllers_->reserve(100);
 		grpc::ServerBuilder builder_;
 		builder_.AddListeningPort(grpc_connection_string(server_info), grpc::InsecureServerCredentials());
 		//master_service_ = GFSMasterServer(chunk_servers_descriptors_, chunk_servers_heartbeat_threads_);

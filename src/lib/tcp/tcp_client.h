@@ -23,6 +23,7 @@ public:
 
 		memset(&server_address_, 0, sizeof(server_address_));
 
+		server_address_.sin_family = AF_INET;
 		int address_conversion_error_code = inet_pton(AF_INET, server_info.ip.c_str(), &server_address_.sin_addr.s_addr);
 		EXIT_IF_TRUE(address_conversion_error_code == 0, "invalid ip address string");
 		EXIT_IF_TRUE(address_conversion_error_code < 0, "address conversion failed");

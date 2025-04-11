@@ -39,21 +39,21 @@ public:
 	}
 
 	void wait(std::function<void(int)> worker) {
+		MESSAGE("[LOG]: TCP WAITING FOR CONNECTIONS");
 		int socket_listen_error_code = listen(socket_, max_connections_);
 		EXIT_IF_TRUE(socket_listen_error_code < 0, "socket listen failed!");
 
 		while(true) {
+			MESSAGE("[LOG]: TCP SERFER LOOP");
 			struct sockaddr_in client_address;
 			socklen_t client_address_length = sizeof(client_address);
 			int client_socket = accept(socket_, (struct sockaddr *) &client_address, &client_address_length);
+			MESSAGE("[LOG]: ACCEPTED SOCKET CONNECTION");
 			threads_.emplace_back(std::thread(worker, client_socket));
+			MESSAGE("[LOG]: THREAD SPAWNED");
 			// the worker needs to acknowledge to the client. get it from write id attached to data.
 		}
 	}
-
-	void data_transfer_worker() {
-		
-	} 
 
 	~TCPServer() {
 		for(std::thread& th: threads_) {

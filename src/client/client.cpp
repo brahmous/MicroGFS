@@ -54,10 +54,12 @@ public:
 					)
 				);
 
-			MESSAGE("[LOG]: PRIMARY SERVER STUB CONStRUCTED");
+			MESSAGE("[LOG]: PRIMARY SERVER STUB CONSTRUCTED");
 			grpc::ClientContext context;
-			const GFSChunkServer::FlushRequest request;
+			GFSChunkServer::FlushRequest request;
 			GFSChunkServer::FlushResponse response; 
+
+			request.set_write_id("hello");
 
 			MESSAGE("[LOG]: Flush call initiated.");
 			stub_->Flush(&context, request, &response);
