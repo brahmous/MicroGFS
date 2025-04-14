@@ -13,6 +13,7 @@
 #include <grpcpp/server.h>
 #include <grpcpp/server_builder.h>
 #include <grpcpp/server_context.h>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <sys/types.h>
@@ -332,6 +333,8 @@ private:
 
 	/*Service offered by the chunk server to the client*/
 	// dictionary
+	//
+	// std::map<uint64_t, > file_namespace;
 };
 
 int main(int argc, char * argv[])
@@ -354,5 +357,6 @@ int main(int argc, char * argv[])
 	//MESSAGE(master_server_info);
 	MESSAGE("[LOG]: Master server waiting start: ");
 	master.listen();
+	MESSAGE("[LOG]: Testing compile time improvement");
 }
 
