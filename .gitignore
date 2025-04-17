@@ -4,3 +4,4 @@ build/
 .vscode/
 .cache
 NOTES.md
+./test_scripts
