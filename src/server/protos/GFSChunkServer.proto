@@ -2,6 +2,16 @@ syntax = "proto3";
 
 package GFSChunkServer;
 
+enum Status {
+  SUCCESS = 0;
+  ERROR = 1;
+}
+
+message Error {
+  int32 error_code = 1;
+  string error_message = 2;
+}
+
 message ChunkMetadata {
   uint64 handle = 1;
   uint32 chunk_size = 2;
@@ -27,15 +37,29 @@ message TcpRpcServerIdentifier {
   uint32 rpc_port = 3;
 }
 
+message SecondaryAndForwardServerInfo {
+  uint32 handle = 1;
+  TcpRpcServerIdentifier server_info = 2;
+  TcpRpcServerIdentifier forward_to = 3;
+}
+
 message AssignPrimaryRequest {
-  uint64 handle = 1;
-  RpcServerIdentifier client_server = 2;
-  repeated TcpRpcServerIdentifier secondary_servers = 3;
-  string write_id = 4;
+  RpcServerIdentifier client_server = 1;
+  uint32 write_id = 2;
+  uint64 handle = 3;
+  uint64 offset = 4;
+  TcpRpcServerIdentifier forward_to = 5;
+  repeated SecondaryAndForwardServerInfo secondary_servers = 6;
+}
+
+message AssignPrimaryResponseBody {
+  bool acknowledgment = 2;
 }
 
 message AssignPrimaryResponse {
-  bool acknowledgment = 1;
+  Status status = 1;
+  AssignPrimaryResponseBody body = 2;
+  Error error = 3;
 }
 
 message AssignSecondaryRequest {
@@ -45,8 +69,14 @@ message AssignSecondaryRequest {
   string write_id = 4;
 }
 
-message AssignSecondaryResponse {
+message AssignSecondaryResponseBody {
   bool acknowledgment = 1;
+}
+
+message AssignSecondaryResponse {
+  Status status = 1;
+  AssignSecondaryResponseBody body = 2;
+  Error error = 3;
 }
 
 message FlushRequest {

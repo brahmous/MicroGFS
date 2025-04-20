@@ -2,15 +2,25 @@ syntax = "proto3";
 
 package GFSMaster;
 
-message ChunkServerIdentifier {
-  string ip = 1;
-  uint32 tcp_port = 3;
-  uint32 rpc_port = 2;
+enum Status {
+  SUCCESS = 0;
+  ERROR = 1;
 }
 
-/**/
+message Error {
+  int32 error_code = 1;
+  string error_message = 2;
+}
+
+message TcpRpcServerInfo {
+  string ip = 1;
+  uint32 tcp_port = 2;
+  uint32 rpc_port = 3;
+}
+
+/*  */
 message RegisterChunkServerRequest {
-  ChunkServerIdentifier server_info = 1;
+  TcpRpcServerInfo server_info = 1;
 }
 
 message RegisterChunkServerResponse {
@@ -18,17 +28,43 @@ message RegisterChunkServerResponse {
 }
 
 message WriteRequest {
-  string file_path = 1;
-  uint32 offset = 2;
-  uint32 data_size = 3;
+  TcpRpcServerInfo client_server_info = 1;
+  string file_path = 2;
+  uint32 offset = 3;
+  uint32 data_size = 4;
+}
+
+message WriteResponseBody {
+  uint32 write_id = 1;
+  TcpRpcServerInfo primary_server = 2;
+  repeated TcpRpcServerInfo secondary_servers = 3;
 }
 
 message WriteResponse {
-  ChunkServerIdentifier primary_server = 1;
-  repeated ChunkServerIdentifier secondary_servers = 2;
+  Status status = 1;
+  WriteResponseBody response_body = 2;
+  Error error = 3;
 }
 
+/* File System API: create file. */
+enum FileType {
+  NORAML = 0;
+  ATOMIC_APPEND = 1;
+}
+message CreateFileResponseBody {
+  bool exists = 1;
+}
+message CreateFileRequest {
+  string path = 1;
+  FileType file_type = 2;
+}
+message CreateFileResponse {
+  Status status = 1;
+  CreateFileResponseBody response = 2;
+  Error error = 3;
+}
 service ChunkServerService {
   rpc RegisterChunkServer(RegisterChunkServerRequest) returns (RegisterChunkServerResponse) {}
   rpc Write(WriteRequest) returns (WriteResponse) {}
+  rpc CreateFile(CreateFileRequest) returns (CreateFileResponse) {}
 }

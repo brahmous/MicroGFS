@@ -9,8 +9,9 @@ std::string grpc_connection_string (const T& descriptor)
 	return ip.append(":").append(std::to_string(descriptor.rpc_port));
 }
 
+void parse_cli_args(char * argv[], int size, master_server_config_t & config);
+
 std::ostream& operator<<(std::ostream& out, const rpc_server_descriptor_t& server_info);
-rpc_server_descriptor_t parse_cli_args(char * argv[], int size);
 
 #endif
 

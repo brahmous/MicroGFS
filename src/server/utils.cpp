@@ -25,9 +25,6 @@ chunkserver_master_connection_descriptor_t  parse_cli_args(char * argv[], int si
 	 * - Push arguments into a set and make sure that all arguments are correct
 	 *   and there aren't duplicates
 	 * */
-
-	MESSAGE("parsing cli arguments...");
-
 	std::vector<std::string> token_stream(size);
 
 	std::vector<std::string>::iterator it = token_stream.begin();
@@ -60,7 +57,6 @@ chunkserver_master_connection_descriptor_t  parse_cli_args(char * argv[], int si
 		}
 	}
 
-	MESSAGE("Finished parsing cli arguments.");
 	chunkserver_master_connection_descriptor_t server_info {chunk_server, master};
 	return server_info;
 }

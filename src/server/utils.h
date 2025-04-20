@@ -10,6 +10,7 @@ std::string grpc_connection_string (const T& descriptor)
 }
 
 std::ostream& operator<<(std::ostream& out, const chunkserver_master_connection_descriptor_t& server_info);
+
 chunkserver_master_connection_descriptor_t  parse_cli_args(char * argv[], int size);
 
 #endif

@@ -13,7 +13,7 @@ std::ostream& operator<<(std::ostream& out, const rpc_server_descriptor_t& serve
 	return out;
 }
 
-rpc_server_descriptor_t parse_cli_args(char * argv[], int size)
+void parse_cli_args(char * argv[], int size, master_server_config_t & config)
 {
 	/* TODO: 
 	 * 1- Validate everything with regular expressions.
@@ -22,8 +22,6 @@ rpc_server_descriptor_t parse_cli_args(char * argv[], int size)
 	 *   and there aren't duplicates
 	 * 2- Refactor all flag parsing into one class.
 	 * */
-
-	rpc_server_descriptor_t master;
 
 	MESSAGE("parsing cli arguments...");
 	std::vector<std::string> token_stream(size);
@@ -41,15 +39,18 @@ rpc_server_descriptor_t parse_cli_args(char * argv[], int size)
 		token_it != token_stream.end();) 
 	{
 		if (*token_it == SERVER_IP_FLAG) {
-			master.ip = *((++token_it)++); 			
+			config.server_info.ip = *((++token_it)++); 			
 		} else if (*token_it == SERVER_RPC_PORT_FLAG) {
-			master.rpc_port = atoi(((++token_it)++)->c_str());
-		} else {
+			config.server_info.rpc_port = atoi(((++token_it)++)->c_str());
+		} else if (*token_it == NUMBER_OF_REPLICAS) {
+			config.number_of_replicas = atoi(((++token_it)++)->c_str());
+		} else if (*token_it == CHUNK_SIZE) {
+
+		}else {
 			MESSAGE_END_EXIT(std::string("error parsing cli arguments | \nunknown token \"").append(*token_it).append("\""));
 		}
 	}
 
 	MESSAGE("Finished parsing cli arguments.");
 
-	return master;
 }
