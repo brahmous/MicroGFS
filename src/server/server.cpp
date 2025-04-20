@@ -72,7 +72,7 @@ public:
             MESSAGE("NOT OK CALL TO SECONDARY");
             result = false;
           } else {
-            result = args.response.acknowledgment();
+           /*NOTE: UNCOMMENT*/ //result = args.response.acknowledgment();
           }
           std::lock_guard<std::mutex> lock(mu);
           counter -= 1;
@@ -217,7 +217,7 @@ public:
       std::unique_lock<std::mutex> lock(mu);
       cv.wait(lock, [&counter] { return counter == 0; });
       // responde with acknowledegement
-      response->set_acknowledgment(acknowledged);
+      /*NOTE: UNCOMMENT*/ // response->set_acknowledgment(acknowledged);
       auto *reactor = context->DefaultReactor();
       reactor->Finish(grpc::Status::OK);
       return reactor;
@@ -227,7 +227,7 @@ public:
         grpc::CallbackServerContext *context,
         const GFSChunkServer::AssignSecondaryRequest *request,
         GFSChunkServer::AssignSecondaryResponse *response) override {
-      response->set_acknowledgment(true);
+      /*NOTE: UNCOMMENT*/ //response->set_acknowledgment(true);
       auto *reactor = context->DefaultReactor();
       reactor->Finish(grpc::Status::OK);
       return reactor;
