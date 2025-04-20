@@ -4,6 +4,7 @@
 #include "../headers/main.h"
 #include <tuple>
 #include <vector>
+
 namespace GFSNameSpace {
 enum class GFSFileType { NORMAL = 1, ATOMIC_APPEND = 2 };
 

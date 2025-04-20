@@ -16,6 +16,7 @@
 #include <string>
 #include <sys/types.h>
 #include <thread>
+#include <tuple>
 #include <unistd.h>
 #include <unordered_map>
 #include <utility>
@@ -35,26 +36,11 @@
 
 // Reader Wrapper: Reads chunk handles, size, etc.. (metadata)
 
-class ChunkServerController {
-public:
-  ChunkServerController(const tcp_rpc_server_descriptor_t &server_info);
-  void ReadChunkMetadata(std::function<void(uint64_t)> add_host_to_namespace);
-  void HeartBeat();
-  void AssignLease(const GFSNameSpace::write_coordinate &write_coordinates,
-                   bool &acknowledged);
-  tcp_rpc_server_descriptor_t server_info();
-
-  double priority = 1.0;
-  tcp_rpc_server_descriptor_t server_info_;
-
-private:
-  std::shared_ptr<GFSChunkServer::ChunkServerService::Stub> chunk_server_stub_;
-};
+class ChunkServerController;
 
 class Master {
 public:
-
-	friend class ChunkMetadataReader;
+  friend class ChunkMetadataReader;
 
   class GFSMasterServiceImplementation
       : public GFSMaster::ChunkServerService::CallbackService {
@@ -100,6 +86,7 @@ private:
   static bool chunk_server_handle_prair_sort_by_ip(
       GFSNameSpace::chunk_server_handle_pair &a,
       GFSNameSpace::chunk_server_handle_pair &b);
+
   static void heartbeat_worker(ChunkServerController *controller,
                                Master *master);
 
@@ -127,7 +114,7 @@ private:
   std::map<int, GFSNameSpace::GFSFile> file_namespace_;
   std::map<int, ChunkServerController> data_servers_;
   std::unordered_map<uint64_t, std::tuple<int, int, int>>
-      chunk_to_file_position_;
+      chunk_to_in_file_position_;
 
   std::vector<int> chunk_server_ordering_;
 
@@ -138,11 +125,28 @@ private:
   std::atomic<uint64_t> handle_counter_;
 };
 
+class ChunkServerController {
+public:
+  ChunkServerController(const tcp_rpc_server_descriptor_t &server_info);
+  void ReadChunkMetadata(Master *master, int server_id);
+  void HeartBeat();
+  void AssignLease(const GFSNameSpace::write_coordinate &write_coordinates,
+                   bool &acknowledged);
+  tcp_rpc_server_descriptor_t server_info();
+
+  double priority = 1.0;
+  tcp_rpc_server_descriptor_t server_info_;
+
+private:
+  std::shared_ptr<GFSChunkServer::ChunkServerService::Stub> chunk_server_stub_;
+};
+
 class ChunkMetadataReader
     : public grpc::ClientReadReactor<GFSChunkServer::ChunkMetadata> {
 
 public:
-  ChunkMetadataReader(GFSChunkServer::ChunkServerService::Stub *stub);
+  ChunkMetadataReader(GFSChunkServer::ChunkServerService::Stub *stub,
+                      Master *master, int host_id);
   void OnReadDone(bool OK) override;
   void OnDone(const grpc::Status &s) override;
   grpc::Status Await();
@@ -155,11 +159,13 @@ private:
   std::condition_variable cv_;
   grpc::Status status_;
   bool done_ = false;
-	Master * m;
+  Master *master_;
+	int host_id;
 };
 
 ChunkMetadataReader::ChunkMetadataReader(
-    GFSChunkServer::ChunkServerService::Stub *stub) {
+    GFSChunkServer::ChunkServerService::Stub *stub, Master *master, int host_id)
+    : master_{master} {
   stub->async()->UploadChunkMetadata(&context_, &req_, this);
   StartRead(&chunk_metadata_);
   StartCall();
@@ -167,6 +173,22 @@ ChunkMetadataReader::ChunkMetadataReader(
 
 void ChunkMetadataReader::OnReadDone(bool OK) {
   if (OK) {
+    /*
+auto [file_id, chunk_index, replica_index] =
+master_->chunk_to_in_file_position_.find(chunk_metadata_.handle())
+->second;
+    */
+
+    int file_id;
+		int chunk_index;
+		int replica_index;
+
+    std::tie(file_id, chunk_index, replica_index) =
+        master_->chunk_to_in_file_position_.find(chunk_metadata_.handle())
+            ->second;
+
+		master_->file_namespace_[file_id].chunks[chunk_index].replicas[replica_index].host_id = host_id;
+
     StartRead(&chunk_metadata_);
   }
 }
@@ -184,7 +206,6 @@ grpc::Status ChunkMetadataReader::Await() {
   return std::move(status_);
 }
 
-
 ChunkServerController::ChunkServerController(
     const tcp_rpc_server_descriptor_t &server_info)
     : server_info_{server_info},
@@ -193,9 +214,8 @@ ChunkServerController::ChunkServerController(
               grpc_connection_string<tcp_rpc_server_descriptor_t>(server_info_),
               grpc::InsecureChannelCredentials()))} {}
 
-void ChunkServerController::ReadChunkMetadata(
-    std::function<void(uint64_t)> add_host_to_namespace) {
-  ChunkMetadataReader reader = ChunkMetadataReader(chunk_server_stub_.get());
+void ChunkServerController::ReadChunkMetadata(Master *master, int host_id) {
+  ChunkMetadataReader reader = ChunkMetadataReader(chunk_server_stub_.get(), master, host_id);
   grpc::Status status = reader.Await();
 
   if (status.ok()) {
@@ -565,12 +585,11 @@ bool Master::chunk_server_handle_prair_sort_by_ip(
 void Master::heartbeat_worker(ChunkServerController *controller,
                               Master *master) {
   // MESSAGE("controller POINTER: " << controller);
-  int server_id = master->chunk_server_id_counter_;
+  int host_id= master->chunk_server_id_counter_;
   master->chunk_server_id_counter_++;
   sleep(2);
-  controller->ReadChunkMetadata([master](uint64_t handle) {
 
-  });
+  controller->ReadChunkMetadata(master, host_id);
   int count = 100;
   while (--count > 0) {
     sleep(2);
@@ -578,6 +597,7 @@ void Master::heartbeat_worker(ChunkServerController *controller,
     // MESSAGE("extend lease: " << (response.extend_lease() ? "true" :
     // "false"));
   }
+
 }
 
 int main(int argc, char *argv[]) {
