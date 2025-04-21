@@ -5,3 +5,4 @@ build/
 .cache
 NOTES.md
 ./test_scripts
+./todo

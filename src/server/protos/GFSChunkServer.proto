@@ -41,6 +41,7 @@ message SecondaryAndForwardServerInfo {
   uint32 handle = 1;
   TcpRpcServerIdentifier server_info = 2;
   TcpRpcServerIdentifier forward_to = 3;
+  bool forward = 4;
 }
 
 message AssignPrimaryRequest {
@@ -67,6 +68,7 @@ message AssignSecondaryRequest {
   RpcServerIdentifier client_server = 2;
   TcpRpcServerIdentifier forward_server = 3;
   string write_id = 4;
+  bool forward = 5;
 }
 
 message AssignSecondaryResponseBody {

@@ -1,4 +1,5 @@
 #include <condition_variable>
+#include <cstdint>
 #include <filesystem>
 #include <google/protobuf/json/json.h>
 #include <google/protobuf/message.h>
@@ -16,6 +17,8 @@
 #include <mutex>
 #include <netdb.h>
 #include <queue>
+#include <sys/types.h>
+#include <utility>
 #include <vector>
 
 #include "../headers/main.h"
@@ -29,16 +32,28 @@
 #include "../client/generated/GFSClientService.grpc.pb.h"
 #include "../client/generated/GFSClientService.pb.h"
 
+#include "../lib/lru_cache/lru_cache.h"
 #include "../lib/tcp/tcp_client.h"
 #include "../lib/tcp/tcp_server.h"
+#include "./server.h"
 
 class ChunkServer;
 void tcp_server_worker(ChunkServer *chunk_server);
 
 struct ChunkDescriptor {
-  std::string name;
   std::size_t size;
-  std::queue<std::string> write_order_queue;
+  std::queue<int> write_order_queue;
+  bool leased;
+};
+
+class ChunkServerController;
+class ClientController;
+
+struct WriteContext {
+  uint64_t handle;
+  std::vector<ChunkServerController> flush_list;
+  tcp_rpc_server_descriptor_t forward_to;
+  std::shared_ptr<ClientController> client;
 };
 
 struct assign_secondary_request_args {
@@ -47,10 +62,23 @@ struct assign_secondary_request_args {
   GFSChunkServer::AssignSecondaryResponse response;
 };
 
-class SecondaryChunkServerController {
+class ClientController {
+  ClientController(const rpc_server_descriptor_t &server_info)
+      : stub_{GFSClient::GFSClientService::NewStub(
+            grpc::CreateChannel(grpc_connection_string(server_info),
+                                grpc::InsecureChannelCredentials()))} {}
+
+  void FlushSecondary() {}
+
+private:
+  std::unique_ptr<GFSClient::GFSClientService::Stub> stub_;
+};
+
+class ChunkServerController {
 public:
-  SecondaryChunkServerController(const tcp_rpc_server_descriptor_t &server_info)
-      : server_info_{server_info},
+  ChunkServerController(const tcp_rpc_server_descriptor_t &server_info,
+                        uint64_t handle)
+      : server_info_{server_info}, handle_{handle},
         secondary_server_stub_{GFSChunkServer::ChunkServerService::NewStub(
             grpc::CreateChannel(grpc_connection_string(server_info),
                                 grpc::InsecureChannelCredentials()))} {}
@@ -72,7 +100,7 @@ public:
             MESSAGE("NOT OK CALL TO SECONDARY");
             result = false;
           } else {
-           /*NOTE: UNCOMMENT*/ //result = args.response.acknowledgment();
+            /*NOTE: UNCOMMENT*/ // result = args.response.acknowledgment();
           }
           std::lock_guard<std::mutex> lock(mu);
           counter -= 1;
@@ -85,6 +113,7 @@ private:
   tcp_rpc_server_descriptor_t server_info_;
   std::unique_ptr<GFSChunkServer::ChunkServerService::Stub>
       secondary_server_stub_;
+  uint64_t handle_;
 };
 
 class ChunkServer {
@@ -92,20 +121,20 @@ public:
   class ChunkServerServiceImplementation final
       : public GFSChunkServer::ChunkServerService::CallbackService {
   public:
-    ChunkServerServiceImplementation(ChunkServer *_chunkserver)
-        : chunkserver{_chunkserver} {}
+    ChunkServerServiceImplementation(ChunkServer *chunk_server)
+        : chunk_server_{chunk_server} {}
 
     grpc::ServerWriteReactor<GFSChunkServer::ChunkMetadata> *
     UploadChunkMetadata(
         grpc::CallbackServerContext *context,
         const GFSChunkServer::UploadChunkMetadataRequest *request) override {
+
       class Writer
           : public grpc::ServerWriteReactor<GFSChunkServer::ChunkMetadata> {
       public:
-        Writer(
-            std::shared_ptr<std::vector<ChunkDescriptor>> chunk_descriptor_list)
-            : chunk_descriptor_list_{chunk_descriptor_list},
-              it_{chunk_descriptor_list_->begin()} {
+        Writer(ChunkServer *chunk_server)
+            : chunk_server_{chunk_server},
+              it_{chunk_server->chunk_dictionary_.begin()} {
           NextWrite();
         }
 
@@ -128,24 +157,24 @@ public:
 
       private:
         void NextWrite() {
-          if (it_ == chunk_descriptor_list_->end()) {
+          if (it_ == chunk_server_->chunk_dictionary_.end()) {
             Finish(grpc::Status::OK);
             return;
           }
-          descriptor.set_handle(std::atoi(it_->name.c_str()));
-          descriptor.set_chunk_size(it_->size);
+          descriptor_.set_handle(it_->first);
+          descriptor_.set_chunk_size(it_->second.size);
           ++it_;
-          StartWrite(&descriptor);
+          StartWrite(&descriptor_);
           // Finish(grpc::Status::OK);
           return;
         }
 
-        GFSChunkServer::ChunkMetadata descriptor;
-        std::shared_ptr<std::vector<ChunkDescriptor>> chunk_descriptor_list_;
-        std::vector<ChunkDescriptor>::const_iterator it_;
+        GFSChunkServer::ChunkMetadata descriptor_;
+        ChunkServer *chunk_server_;
+        std::map<uint64_t, ChunkDescriptor>::const_iterator it_;
       };
 
-      return new Writer(chunkserver->chunk_descriptor_list_);
+      return new Writer(chunk_server_);
     }
 
     grpc::ServerUnaryReactor *
@@ -163,53 +192,58 @@ public:
                   const GFSChunkServer::AssignPrimaryRequest *request,
                   GFSChunkServer::AssignPrimaryResponse *response) override {
       // std::atomic<int> counter = request->secondary_servers().size();
-      std::atomic<int> counter = 3;
+      std::atomic<int> counter = request->secondary_servers().size();
       bool acknowledged = false;
       std::mutex mu;
       std::condition_variable cv;
 
-      // set lease in local in memory chunk structure
-      // forward the lease to the secondaries
-      // MESSAGE("client ip: " << request->client_server().ip());
-      // MESSAGE("client port: " << request->client_server().rpc_port());
+      WriteContext write_context;
+      write_context.handle = request->handle();
 
-      tcp_rpc_server_descriptor_t server1_info;
-      server1_info.ip = "0.0.0.0";
-      server1_info.rpc_port = 6501;
-      server1_info.tcp_port = 6001;
+      rpc_server_descriptor_t client_server_info;
+      client_server_info.ip = request->client_server().ip();
+      client_server_info.rpc_port = request->client_server().rpc_port();
+      write_context.client =
+          std::make_shared<ClientController>(client_server_info);
 
-      tcp_rpc_server_descriptor_t server2_info;
-      server2_info.ip = "0.0.0.0";
-      server2_info.rpc_port = 6502;
-      server2_info.tcp_port = 6002;
+      write_context.forward_to.ip = request->forward_to().ip();
+      write_context.forward_to.tcp_port = request->forward_to().tcp_port();
+      write_context.forward_to.rpc_port = request->forward_to().rpc_port();
 
-      tcp_rpc_server_descriptor_t server3_info;
-      server3_info.ip = "0.0.0.0";
-      server3_info.rpc_port = 6503;
-      server3_info.tcp_port = 6003;
-
-      // std::vector<SecondaryChunkServerController> controllers;
-
-      std::vector<SecondaryChunkServerController> controllers;
-
-      controllers.emplace_back(server1_info);
-      controllers.emplace_back(server2_info);
-      controllers.emplace_back(server3_info);
-
-      std::vector<assign_secondary_request_args> args(3);
-      /*
       for (int i = 0; i < request->secondary_servers().size(); ++i) {
-              MESSAGE("[LOG]: secondary ip: " <<
-      request->secondary_servers(i).ip()); server_info.ip =
-      request->secondary_servers(i).ip(); MESSAGE("[LOG]: secondary port: " <<
-      request->secondary_servers(i).rpc_port()); server_info.rpc_port =
-      request->secondary_servers(i).rpc_port();
-              controllers.emplace_back(server_info);
+        tcp_rpc_server_descriptor_t forward_server_info;
+        forward_server_info.ip =
+            request->secondary_servers().at(i).server_info().ip();
+        forward_server_info.tcp_port =
+            request->secondary_servers().at(i).server_info().tcp_port();
+        forward_server_info.rpc_port =
+            request->secondary_servers().at(i).server_info().rpc_port();
+        write_context.flush_list.emplace_back(
+            ChunkServerController(forward_server_info, request->handle()));
       }
-      */
+
+      std::vector<assign_secondary_request_args> args(
+          request->secondary_servers().size());
 
       int args_i = 0;
-      for (SecondaryChunkServerController &controller : controllers) {
+      for (ChunkServerController &controller : write_context.flush_list) {
+        args[args_i].request.set_write_id(request->write_id());
+        args[args_i].request.set_handle(
+            request->secondary_servers().at(args_i).handle());
+        args[args_i].request.set_forward(
+            request->secondary_servers().at(args_i).forward());
+        args[args_i].request.mutable_client_server()->set_ip(
+            request->client_server().ip());
+        args[args_i].request.mutable_client_server()->set_rpc_port(
+            request->client_server().rpc_port());
+        if (args[args_i].request.forward()) {
+          args[args_i].request.mutable_forward_server()->set_ip(
+              request->secondary_servers().at(args_i).forward_to().ip());
+          args[args_i].request.mutable_forward_server()->set_tcp_port(
+              request->secondary_servers().at(args_i).forward_to().tcp_port());
+          args[args_i].request.mutable_forward_server()->set_rpc_port(
+              request->secondary_servers().at(args_i).forward_to().rpc_port());
+        }
         controller.assignSecondary(counter, cv, mu, acknowledged, args[args_i]);
         ++args_i;
       }
@@ -218,6 +252,23 @@ public:
       cv.wait(lock, [&counter] { return counter == 0; });
       // responde with acknowledegement
       /*NOTE: UNCOMMENT*/ // response->set_acknowledgment(acknowledged);
+
+      if (acknowledged == true) {
+        chunk_server_->write_id_to_context_map_.insert(
+            {request->write_id(), write_context});
+        chunk_server_->chunk_dictionary_[request->handle()].leased = true;
+        chunk_server_->chunk_dictionary_[request->handle()]
+            .write_order_queue.push(request->write_id());
+        response->set_status(GFSChunkServer::Status::SUCCESS);
+        response->mutable_body()->set_acknowledgment(true);
+      } else {
+        response->set_status(GFSChunkServer::Status::ERROR);
+        response->mutable_error()->set_error_code(2030);
+        response->mutable_error()->set_error_message(
+            std::string("ERROR Assignging the secondary servers for write ")
+                .append(std::to_string(request->write_id())));
+      }
+
       auto *reactor = context->DefaultReactor();
       reactor->Finish(grpc::Status::OK);
       return reactor;
@@ -227,7 +278,7 @@ public:
         grpc::CallbackServerContext *context,
         const GFSChunkServer::AssignSecondaryRequest *request,
         GFSChunkServer::AssignSecondaryResponse *response) override {
-      /*NOTE: UNCOMMENT*/ //response->set_acknowledgment(true);
+      /*NOTE: UNCOMMENT*/ // response->set_acknowledgment(true);
       auto *reactor = context->DefaultReactor();
       reactor->Finish(grpc::Status::OK);
       return reactor;
@@ -323,14 +374,12 @@ public:
     }
 
   private:
-    ChunkServer *chunkserver;
+    ChunkServer *chunk_server_;
   };
 
   ChunkServer(const chunkserver_master_connection_descriptor_t &server_info)
-      : chunk_descriptor_list_{std::make_shared<
-            std::vector<ChunkDescriptor>>()},
-        chunkserver_master_connection_info_{server_info},
-        chunk_server_service_{this},
+      : chunkserver_master_connection_info_{server_info},
+        chunk_server_service_{this}, buffer_cache{8, 8096},
         master_stub_{GFSMaster::ChunkServerService::NewStub(
             grpc::CreateChannel(grpc_connection_string<rpc_server_descriptor_t>(
                                     chunkserver_master_connection_info_.master),
@@ -395,15 +444,19 @@ private:
     for (auto const &directory_entry :
          std::filesystem::directory_iterator(chunks_folder)) {
       std::string path = directory_entry.path();
-      ChunkDescriptor desc{
-          path.substr(path.rfind("/") + 1, path.size() - path.rfind("/")),
-          directory_entry.file_size()};
-      chunk_descriptor_list_->push_back(desc);
+
+      uint64_t chunk_handle = std::atol(
+          path.substr(path.rfind("/") + 1, path.size() - path.rfind("/"))
+              .c_str());
+
+      ChunkDescriptor chunk_descriptor;
+      chunk_descriptor.leased = false;
+      chunk_descriptor.size = directory_entry.file_size();
+
+      chunk_dictionary_.insert(std::make_pair(chunk_handle, chunk_descriptor));
     }
-    chunk_descriptor_list_->shrink_to_fit();
   }
 
-  std::shared_ptr<std::vector<ChunkDescriptor>> chunk_descriptor_list_;
   /* ChunkServer-Master Connection Info */
   chunkserver_master_connection_descriptor_t
       chunkserver_master_connection_info_;
@@ -415,6 +468,10 @@ private:
   std::unique_ptr<grpc::Server> server_;
 
   std::thread tcp_worker_thread;
+
+  std::map<uint64_t, ChunkDescriptor> chunk_dictionary_;
+  std::unordered_map<int, WriteContext> write_id_to_context_map_;
+  GFSLRUCache buffer_cache;
 
   /*LRUCache...
    * map:- write id -> buffer

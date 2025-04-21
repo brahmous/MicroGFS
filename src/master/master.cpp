@@ -178,7 +178,6 @@ auto [file_id, chunk_index, replica_index] =
 master_->chunk_to_in_file_position_.find(chunk_metadata_.handle())
 ->second;
     */
-
     int file_id;
 		int chunk_index;
 		int replica_index;
