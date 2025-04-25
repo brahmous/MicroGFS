@@ -13,6 +13,7 @@
 #define MASTER_PORT_FLAG 			"--master-port"
 #define NUMBER_OF_REPLICAS    "--number-of-replicas"
 #define CHUNK_SIZE 						"--chunk-size"
+#define STORAGE_FOLDER_PATH   "--storage-folder"
 
 /*
  * TODO: too much duplication. refactor!
@@ -44,6 +45,11 @@ typedef struct master_server_config_t {
 	unsigned int number_of_replicas = 0;
 	unsigned int chunk_size = 0;
 } master_server_config_t;
+
+struct chunk_server_config_t{
+	chunkserver_master_connection_descriptor_t chunkserver_master_connection_info; 
+	std::string storage_file_path;
+};
 
 std::ostream& operator<<(std::ostream& out, const rpc_server_descriptor_t& server_info); 
 

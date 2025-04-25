@@ -13,6 +13,8 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <spdlog/logger.h>
+#include <sstream>
 #include <string>
 #include <sys/types.h>
 #include <thread>
@@ -24,10 +26,12 @@
 // #include <absl/strings/str_format.h>
 
 #include "../headers/main.h"
+#include "../lib/logger/logger.h"
 #include "../server/generated/GFSChunkServer.grpc.pb.h"
 #include "generated/GFSMasterService.grpc.pb.h"
 #include "generated/GFSMasterService.pb.h"
 #include "utils.h"
+#include <cassert>
 #include <grpc/grpc.h>
 #include <grpcpp/security/server_credentials.h>
 #include <grpcpp/server.h>
@@ -35,6 +39,7 @@
 #include <grpcpp/server_context.h>
 
 // Reader Wrapper: Reads chunk handles, size, etc.. (metadata)
+//
 
 class ChunkServerController;
 
@@ -87,8 +92,7 @@ private:
       GFSNameSpace::chunk_server_handle_pair &a,
       GFSNameSpace::chunk_server_handle_pair &b);
 
-  static void heartbeat_worker(ChunkServerController *controller,
-                               Master *master);
+  static void heartbeat_worker(int contoller_id, Master *master);
 
 private:
   /*Chunk Servers Data*/
@@ -113,17 +117,62 @@ private:
 
   std::map<int, GFSNameSpace::GFSFile> file_namespace_;
   std::map<int, ChunkServerController> data_servers_;
-  std::unordered_map<uint64_t, std::tuple<int, int, int>>
-      chunk_to_in_file_position_;
+
+  /*TODO: */
+  /*std::unordered_map<uint64_t, std::tuple<int, int, int>>
+      chunk_to_in_file_position_;*/
+  std::map<uint64_t, std::tuple<int, int, int>> chunk_to_in_file_position_;
 
   std::vector<int> chunk_server_ordering_;
 
   /*Sequence Counter*/
-  std::atomic<int> file_id_counter_;
-  std::atomic<int> chunk_server_id_counter_;
-  std::atomic<int> write_id_counter_;
-  std::atomic<uint64_t> handle_counter_;
+  std::atomic<int> file_id_counter_ = 0;
+  std::atomic<int> chunk_server_id_counter_ = 0;
+  std::atomic<int> write_id_counter_ = 0;
+  std::atomic<uint64_t> handle_counter_ = 0;
 };
+
+void print_gfsfile(const GFSNameSpace::GFSFile &file) {
+
+  std::ostream &out = std::cout;
+  std::stringstream output;
+
+  output << "Mode: "
+         << (file.mode == GFSNameSpace::GFSFileType::NORMAL ? "Normal"
+                                                            : "Atomic Append")
+         << "\n";
+  output << "File Size: " << file.size << "\n";
+
+  int chunk_counter = 0;
+  for (const GFSNameSpace::chunk_descriptor &chunk : file.chunks) {
+    output << "###### Chunk index: " << chunk_counter << "######\n";
+    output << "Chunk Size :" << chunk.size << "\n";
+
+    output << "#### Chunk Replicas. ####\n";
+    output << "Lease Host ID: " << chunk.lease.host_id << "\n";
+    output << "Lease Issued At: " << chunk.lease.issued_at << "\n";
+
+    int chunk_replica_index = 0;
+    for (const GFSNameSpace::chunk_replica_descriptor &chunk_replica :
+         chunk.replicas) {
+      output << "## Chunk Replicas: " << chunk_replica_index << "##\n";
+      output << "Replica Handle: " << chunk_replica.handle << "\n";
+      output << "Host Id: " << chunk_replica.host_id << "\n";
+      chunk_replica_index++;
+    }
+    chunk_counter++;
+  }
+  out << output.str() << "\n";
+}
+
+void print_chunk_to_file_map(
+    const std::map<uint64_t, std::tuple<int, int, int>> &map) {
+  for (auto it : map) {
+    std::cout << it.first << " : file_index (" << std::get<0>(it.second)
+              << "), chunk_index (" << std::get<1>(it.second)
+              << "), chunk_replica_index (" << std::get<2>(it.second) << "\n";
+  }
+}
 
 class ChunkServerController {
 public:
@@ -160,12 +209,12 @@ private:
   grpc::Status status_;
   bool done_ = false;
   Master *master_;
-	int host_id;
+  int host_id_;
 };
 
 ChunkMetadataReader::ChunkMetadataReader(
     GFSChunkServer::ChunkServerService::Stub *stub, Master *master, int host_id)
-    : master_{master} {
+    : master_{master}, host_id_{host_id} {
   stub->async()->UploadChunkMetadata(&context_, &req_, this);
   StartRead(&chunk_metadata_);
   StartCall();
@@ -179,14 +228,17 @@ master_->chunk_to_in_file_position_.find(chunk_metadata_.handle())
 ->second;
     */
     int file_id;
-		int chunk_index;
-		int replica_index;
+    int chunk_index;
+    int replica_index;
 
     std::tie(file_id, chunk_index, replica_index) =
         master_->chunk_to_in_file_position_.find(chunk_metadata_.handle())
             ->second;
 
-		master_->file_namespace_[file_id].chunks[chunk_index].replicas[replica_index].host_id = host_id;
+    master_->file_namespace_[file_id]
+        .chunks[chunk_index]
+        .replicas[replica_index]
+        .host_id = host_id_;
 
     StartRead(&chunk_metadata_);
   }
@@ -214,7 +266,8 @@ ChunkServerController::ChunkServerController(
               grpc::InsecureChannelCredentials()))} {}
 
 void ChunkServerController::ReadChunkMetadata(Master *master, int host_id) {
-  ChunkMetadataReader reader = ChunkMetadataReader(chunk_server_stub_.get(), master, host_id);
+  ChunkMetadataReader reader =
+      ChunkMetadataReader(chunk_server_stub_.get(), master, host_id);
   grpc::Status status = reader.Await();
 
   if (status.ok()) {
@@ -238,13 +291,18 @@ void ChunkServerController::AssignLease(
   GFSChunkServer::AssignPrimaryRequest request;
   GFSChunkServer::AssignPrimaryResponse response;
 
-  request.set_handle(write_coordinates.chunk_server_handle_list.front().handle);
   request.set_write_id(write_coordinates.write_id);
+  request.set_handle(write_coordinates.chunk_server_handle_list.front().handle);
   request.set_offset(write_coordinates.write_offset);
+
   request.mutable_client_server()->set_ip(
       write_coordinates.client_server_info.ip);
   request.mutable_client_server()->set_rpc_port(
       write_coordinates.client_server_info.rpc_port);
+
+  assert(write_coordinates.chunk_server_handle_list.size() > 1 &&
+         "there is only one server involved in a write");
+
   request.mutable_forward_to()->set_ip(
       write_coordinates.chunk_server_handle_list[1].server_info.ip);
   request.mutable_forward_to()->set_rpc_port(
@@ -252,14 +310,11 @@ void ChunkServerController::AssignLease(
   request.mutable_forward_to()->set_tcp_port(
       write_coordinates.chunk_server_handle_list[1].server_info.tcp_port);
 
-  for (int i = 1; i < write_coordinates.chunk_server_handle_list.size() - 1;
-       ++i) {
+  for (int i = 1; i < write_coordinates.chunk_server_handle_list.size(); ++i) {
     GFSChunkServer::SecondaryAndForwardServerInfo *secondary_and_forward_info =
         request.mutable_secondary_servers()->Add();
 
     const GFSNameSpace::chunk_server_handle_pair &secondary_server =
-        write_coordinates.chunk_server_handle_list[i];
-    const GFSNameSpace::chunk_server_handle_pair &forward_server =
         write_coordinates.chunk_server_handle_list[i];
 
     secondary_and_forward_info->mutable_server_info()->set_ip(
@@ -270,22 +325,33 @@ void ChunkServerController::AssignLease(
         secondary_server.server_info.rpc_port);
     secondary_and_forward_info->set_handle(secondary_server.handle);
 
-    secondary_and_forward_info->mutable_forward_to()->set_ip(
-        forward_server.server_info.ip);
-    secondary_and_forward_info->mutable_forward_to()->set_tcp_port(
-        forward_server.server_info.tcp_port);
-    secondary_and_forward_info->mutable_forward_to()->set_rpc_port(
-        forward_server.server_info.rpc_port);
-  }
+    if (i + 1 < write_coordinates.chunk_server_handle_list.size()) {
+      const GFSNameSpace::chunk_server_handle_pair &forward_server =
+          write_coordinates.chunk_server_handle_list[i + 1];
 
+      secondary_and_forward_info->mutable_forward_to()->set_ip(
+          forward_server.server_info.ip);
+      secondary_and_forward_info->mutable_forward_to()->set_tcp_port(
+          forward_server.server_info.tcp_port);
+      secondary_and_forward_info->mutable_forward_to()->set_rpc_port(
+          forward_server.server_info.rpc_port);
+      secondary_and_forward_info->set_forward(true);
+    } else {
+      secondary_and_forward_info->set_forward(false);
+    }
+  }
   /*
    * 1-primary
    * 1->2
    * 2->3
    * i<size-1
    * */
+  MAINLOG_ERROR("AssignLease 1");
   chunk_server_stub_->AssignPrimary(&context, request, &response);
+  MAINLOG_ERROR("AssignLease 2");
   acknowledged = response.body().acknowledgment();
+  MESSAGE("ACK: " << acknowledged);
+  MAINLOG_ERROR("AssignLease 3");
 }
 
 tcp_rpc_server_descriptor_t ChunkServerController::server_info() {
@@ -314,24 +380,26 @@ Master::GFSMasterServiceImplementation::RegisterChunkServer(
     const GFSMaster::RegisterChunkServerRequest *request,
     GFSMaster::RegisterChunkServerResponse *response) {
 
+  MAINLOG_INFO("CHUNK SERVER REGISTERED");
+
   tcp_rpc_server_descriptor_t chunk_server_info;
   chunk_server_info.ip = request->server_info().ip();
-  chunk_server_info.rpc_port = request->server_info().rpc_port();
   chunk_server_info.tcp_port = request->server_info().tcp_port();
+  chunk_server_info.rpc_port = request->server_info().rpc_port();
 
   /*
    * Issue a new id for a new controller.
    * */
-  ChunkServerController &controller =
-      master->chunk_servers_controllers_->emplace_back(chunk_server_info);
+  int controller_id = master->chunk_server_id_counter_;
+  MAINLOG_WARN(controller_id);
+  ++master->chunk_server_id_counter_;
+  MAINLOG_WARN(controller_id);
 
-  /*heartbeat_worker(ChunkServerController *controller, int server_id,
-                     std::map<int, GFSNameSpace::GFSFile> &file_namespace_,
-                     std::unordered_map<uint64_t, std::tuple<int, int, int>>
-                         &jhunk_to_file_position) {*/
-
+  master->data_servers_.insert(
+      std::make_pair(controller_id, ChunkServerController(chunk_server_info)));
+  master->chunk_server_ordering_.push_back(controller_id);
   master->chunk_servers_heartbeat_threads_->emplace_back(
-      std::thread(heartbeat_worker, std::addressof(controller), master));
+      std::thread(heartbeat_worker, controller_id, master));
 
   GFSMaster::RegisterChunkServerResponse res;
   res.set_acknowledged(true);
@@ -404,17 +472,23 @@ grpc::ServerUnaryReactor *Master::GFSMasterServiceImplementation::Write(
     const GFSMaster::WriteRequest *request,
     GFSMaster::WriteResponse *response) {
 
+  for (auto controller : master->data_servers_) {
+    std::cout << "Server id: " << controller.first
+              << " \nserver ip: " << controller.second.server_info_.ip
+              << "\nrpc_port: " << controller.second.server_info_.rpc_port
+              << "\n";
+  }
+
+  MAINLOG_INFO("Write API call invoked");
   GFSNameSpace::write_coordinate write_coordinates;
 
-  write_coordinates.client_server_info.ip = request->client_server_info().ip();
-  write_coordinates.client_server_info.rpc_port =
-      request->client_server_info().rpc_port();
-  write_coordinates.client_server_info.tcp_port =
-      request->client_server_info().tcp_port();
+  write_coordinates.setClient(&request->client_server_info());
 
   /*Check if we have sufficient servers*/
   std::size_t write_replica_count = std::min(
       master->chunk_server_ordering_.size(), master->number_of_replicas);
+
+  std::cout << "Replica Count: " << write_replica_count << "\n";
 
   if (master->chunk_server_ordering_.size() < master->number_of_replicas) {
     /*
@@ -422,6 +496,7 @@ grpc::ServerUnaryReactor *Master::GFSMasterServiceImplementation::Write(
      * servers and at somepoint later this would be considered lost chunks
      * and re-replicated where there arenumber-of-replicas more servers. or
      * we can just respond with an error there aren't enough servers.
+     *
      * */
   }
 
@@ -431,48 +506,83 @@ grpc::ServerUnaryReactor *Master::GFSMasterServiceImplementation::Write(
   std::string file_path{request->file_path()};
   int file_id;
 
+  /*
+   * Obtaining the file ID from the file path.
+   * */
   if (auto find_result = master->file_name_to_integer_index.find(file_path);
       find_result != master->file_name_to_integer_index.end()) {
     found = true;
     file_id = find_result->second;
+  } else {
+    MAINLOG_ERROR("FILE NOT FOUND!!");
   }
 
   if (found) {
-    GFSNameSpace::GFSFile &file = master->file_namespace_[file_id];
+    GFSNameSpace::GFSFile &file = master->file_namespace_.find(file_id)->second;
 
     int chunk_index;
-    write_coordinates.write_offset = file.size % file.chunk_size;
+    write_coordinates.write_offset = request->offset() % file.chunk_size;
 
+    /*FIle is empty*/
     if (file.size == 0) {
       chunk_index = 0;
-      write_coordinates.write_id++;
+      /*Get new Coordinate ID*/
+      write_coordinates.write_id = master->write_id_counter_++;
+
+      /*Heapifty to select the best chunk servers*/
       std::make_heap(master->chunk_server_ordering_.begin(),
                      master->chunk_server_ordering_.end(),
                      chunk_server_priority_comparator(&master->data_servers_));
 
+      /* Put the selected servers in the write coordinates,
+       * The first server is the primary*/
       for (int i = 0; i < write_replica_count; ++i) {
         write_coordinates.chunk_server_handle_list.push_back(
             {master->handle_counter_++,
              master->data_servers_.find(master->chunk_server_ordering_[i])
                  ->second.server_info_});
       }
-      master->data_servers_.find(*master->chunk_server_ordering_.begin())
+
+      assert(write_coordinates.chunk_server_handle_list.size() == 2 &&
+             "write coordinates has 2 servers primary and one secondary");
+
+      /*
+      for (int i=0; i<write_replica_count; ++i) {
+              std::cout << "################################### i= "<< i << "
+      ##########################\n"; std::cout <<
+      write_coordinates.chunk_server_handle_list[i].server_info.ip << "\n";;
+              std::cout <<
+      write_coordinates.chunk_server_handle_list[i].server_info.rpc_port <<
+      "\n";;
+      }
+      */
+
+      /* Assign Lease to the primary*/
+      master->data_servers_.find(master->chunk_server_ordering_[0])
           ->second.AssignLease(write_coordinates, acknowledged);
+      MAINLOG_INFO((std::stringstream("after assign lease (ack: ")
+                    << acknowledged << "\n")
+                       .str());
     } else {
       chunk_index = file.size / file.chunk_size;
       /*we have the chunk index*/
-      if (chunk_index >= file.chunks.size()) {
+      if (chunk_index > file.chunks.size()) {
         /* Write that skips some chunks
          * could throw an error or just issue the writes to write the chunks
          * in between.
          * */
       } else {
         /*
-         * Retreive all the chunks hosts.
+         * Write is within
          * */
+
         std::unordered_map<std::string, int> host_ip_id_map;
 
+        /*
+         * Get new Write ID
+         * */
         write_coordinates.write_id = master->write_id_counter_++;
+
         for (const GFSNameSpace::chunk_replica_descriptor &replica_descriptor :
              file.chunks[chunk_index].replicas) {
           write_coordinates.chunk_server_handle_list.push_back(
@@ -488,6 +598,7 @@ grpc::ServerUnaryReactor *Master::GFSMasterServiceImplementation::Write(
         std::sort(write_coordinates.chunk_server_handle_list.begin(),
                   write_coordinates.chunk_server_handle_list.begin(),
                   chunk_server_handle_prair_sort_by_ip);
+
         master->data_servers_
             .find(host_ip_id_map[write_coordinates.chunk_server_handle_list
                                      .begin()
@@ -518,6 +629,7 @@ grpc::ServerUnaryReactor *Master::GFSMasterServiceImplementation::Write(
       response_secondary_server->set_rpc_port(secondary_server.rpc_port);
     }
   } else {
+    MAINLOG_ERROR("ERROR no acknowldegement");
     response->set_status(::GFSMaster::Status::ERROR);
     response->mutable_error()->set_error_code(2000);
     response->mutable_error()->set_error_message("Lease assignment failed!");
@@ -556,6 +668,45 @@ Master::Master(const master_server_config_t &master_config)
   // chunk_servers_heartbeat_threads_);
   builder_.RegisterService(&master_service_);
   server_ = std::unique_ptr(builder_.BuildAndStart());
+
+  /*NOTE: HARD CODED DELETE LATER*/
+  GFSNameSpace::GFSFile file;
+  file.mode = GFSNameSpace::GFSFileType::NORMAL;
+  file.size = 0;
+  file.chunk_size = 4096;
+  GFSNameSpace::chunk_replica_descriptor chunk1_replica1{1111111, -1};
+  GFSNameSpace::chunk_replica_descriptor chunk1_replica2{3333333, -1};
+  GFSNameSpace::chunk_descriptor chunk1;
+  chunk1.replicas.push_back(chunk1_replica1);
+  chunk1.replicas.push_back(chunk1_replica2);
+  GFSNameSpace::chunk_replica_descriptor chunk2_replica1{2222222, -1};
+  GFSNameSpace::chunk_replica_descriptor chunk2_replica2{4444444, -1};
+  GFSNameSpace::chunk_descriptor chunk2;
+  chunk2.replicas.push_back(chunk2_replica1);
+  chunk2.replicas.push_back(chunk2_replica2);
+  file.chunks.push_back(chunk1);
+  file.chunks.push_back(chunk2);
+
+  file_name_to_integer_index.insert(std::make_pair("testfile", 1));
+  integer_index_to_file_name.insert(std::make_pair(1, "testfile"));
+
+  chunk_to_in_file_position_.insert(
+      std::make_pair(1111111, std::make_tuple(1, 0, 0)));
+  chunk_to_in_file_position_.insert(
+      std::make_pair(3333333, std::make_tuple(1, 0, 1)));
+  chunk_to_in_file_position_.insert(
+      std::make_pair(2222222, std::make_tuple(1, 1, 0)));
+  chunk_to_in_file_position_.insert(
+      std::make_pair(4444444, std::make_tuple(1, 1, 1)));
+
+  file_namespace_.insert({1, std::move(file)});
+  /*END NOTE*/
+
+  int file_index = file_name_to_integer_index.find("testfile")->second;
+
+  std::cout << "testfile\n";
+  print_gfsfile(file_namespace_.find(file_index)->second);
+  print_chunk_to_file_map(chunk_to_in_file_position_);
 }
 
 void Master::listen() { server_->Wait(); }
@@ -581,36 +732,34 @@ bool Master::chunk_server_handle_prair_sort_by_ip(
   return a.server_info.ip < b.server_info.ip;
 }
 
-void Master::heartbeat_worker(ChunkServerController *controller,
-                              Master *master) {
-  // MESSAGE("controller POINTER: " << controller);
-  int host_id= master->chunk_server_id_counter_;
-  master->chunk_server_id_counter_++;
+void Master::heartbeat_worker(int host_id, Master *master) {
+  MAINLOG_INFO("Heartbeat thread started");
+  ChunkServerController &controller =
+      master->data_servers_.find(host_id)->second;
   sleep(2);
-
-  controller->ReadChunkMetadata(master, host_id);
+  controller.ReadChunkMetadata(master, host_id);
+  print_gfsfile(master->file_namespace_.find(1)->second);
   int count = 100;
   while (--count > 0) {
     sleep(2);
-    controller->HeartBeat();
+    controller.HeartBeat();
     // MESSAGE("extend lease: " << (response.extend_lease() ? "true" :
     // "false"));
   }
-
 }
 
 int main(int argc, char *argv[]) {
 
+  GFSLogger::Logger::init();
+
   if (argc < 7 or argc > 7) {
-    MESSAGE_END_EXIT("USAGE: ./server --ip <ipv4-address> --rpc-port <port> "
+    MESSAGE_END_EXIT("USAGE: ./master --ip <ipv4-address> --rpc-port <port> "
                      "--number-of-replicas <number of replicas(integer)>");
   }
 
   master_server_config_t master_config;
 
   parse_cli_args(argv + 1, argc - 1, master_config);
-
-  MESSAGE("Number of replicas: " << master_config.number_of_replicas);
 
   Master master(master_config);
   // MESSAGE(master_server_info);

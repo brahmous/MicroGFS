@@ -36,10 +36,7 @@ public:
 		EXIT_IF_TRUE(connect_error_code < 0, "establishing connection failed!");
 	}
 
-	void write(std::string write_id, const char * buffer, size_t buffer_size) 
-	{
-
-	}
+	void write(std::string write_id, const char * buffer, size_t buffer_size);
 
 private:
 	int socket_;

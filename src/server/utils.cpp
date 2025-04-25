@@ -18,7 +18,7 @@ std::ostream& operator<<(std::ostream& out, const chunkserver_master_connection_
 	return out;
 }
 
-chunkserver_master_connection_descriptor_t  parse_cli_args(char * argv[], int size) {
+chunk_server_config_t parse_cli_args(char * argv[], int size) {
 	/* TODO: 
 	 * Validate everything with regular expressions.
 	 * Add better error handling for arguments.
@@ -36,6 +36,7 @@ chunkserver_master_connection_descriptor_t  parse_cli_args(char * argv[], int si
 
 	tcp_rpc_server_descriptor_t chunk_server;
 	rpc_server_descriptor_t master;
+	std::string storage_folder_path;
 
 	// std::unordered_set<std::string> set;
 
@@ -52,12 +53,15 @@ chunkserver_master_connection_descriptor_t  parse_cli_args(char * argv[], int si
 			master.ip = *((++token_it)++); 			
 		} else if (*token_it == MASTER_PORT_FLAG) {
 			master.rpc_port= atoi(((++token_it)++)->c_str());
-		} else {
+		} else if (*token_it == STORAGE_FOLDER_PATH) {
+			storage_folder_path = *((++token_it)++); 			
+		}
+		else {
 			MESSAGE_END_EXIT(std::string("error parsing cli arguments:\nunknown token").append(*token_it));
 		}
 	}
 
 	chunkserver_master_connection_descriptor_t server_info {chunk_server, master};
-	return server_info;
+	return {server_info, storage_folder_path};
 }
 

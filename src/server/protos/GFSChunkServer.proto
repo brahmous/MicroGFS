@@ -67,7 +67,7 @@ message AssignSecondaryRequest {
   uint64 handle = 1;
   RpcServerIdentifier client_server = 2;
   TcpRpcServerIdentifier forward_server = 3;
-  string write_id = 4;
+  int32 write_id = 4;
   bool forward = 5;
 }
 
@@ -81,12 +81,18 @@ message AssignSecondaryResponse {
   Error error = 3;
 }
 
+message FlushResponseBody {
+  bool acknowledgement = 1;
+}
+
 message FlushRequest {
-  string write_id = 1;
+  int32 write_id = 1;
 }
 
 message FlushResponse {
-  bool flushed = 1;
+  Status status = 1;
+  FlushResponseBody body = 2;
+  Error error = 3;
 }
 
 service ChunkServerService {

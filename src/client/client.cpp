@@ -14,6 +14,8 @@
 #include "generated/GFSClientService.grpc.pb.h"
 #include "generated/GFSClientService.pb.h"
 
+#include "../lib/logger/logger.h"
+
 class GFSClientServiceImplementation final : public GFSClient::GFSClientService::Service {
 
 public:
@@ -49,11 +51,11 @@ public:
 			GFSChunkServer::FlushRequest request;
 			GFSChunkServer::FlushResponse response; 
 
-			request.set_write_id("hello");
+			request.set_write_id(20);
 
 			stub_->Flush(&context, request, &response);
 
-			if (response.flushed()) {
+			if (response.body().acknowledgement()) {
 				MESSAGE("DATA WRITTEEEEEEEEEEEENNNNNNNNNNN WOOOOHOOOOOOOOOOOOOOOOOOOOOO!!!!!!!!!!!!!");
 			}
 
@@ -67,29 +69,29 @@ private:
 	int acknowledgement_count = 4;
 };
 
-void MicroGFS::write(std::string file_path, unsigned int offset, unsigned int size) {
+void MicroGFS::write(std::string file_path, unsigned int offset, unsigned int size, const char* buffer) {
 	grpc::ClientContext context;
 	GFSMaster::WriteRequest request;
 	GFSMaster::WriteResponse response;
+
+	MAINLOG_INFO("Write command issued!");
 
 	request.set_file_path(file_path);
 	request.set_data_size(offset);
 	request.set_offset(size);
 
-
-	/*
 	master_stub_->Write(&context,request, &response);
-	for (int i=0; i<response.secondary_servers_size(); ++i) {
-	}
-	*/
 
 	tcp_rpc_server_descriptor_t chunk_server;
-	chunk_server.ip = "0.0.0.0";
-	chunk_server.tcp_port =  6000;
-	chunk_server.rpc_port =  6500;
+	chunk_server.ip = response.response_body().primary_server().ip();
+	chunk_server.tcp_port = response.response_body().primary_server().tcp_port();
+	chunk_server.rpc_port =  response.response_body().primary_server().rpc_port();
+
+	MAINLOG_INFO("primary credentials:\n IP: {}, TCP PORT: {}, RPC PORT: {}\n", chunk_server.ip, chunk_server.tcp_port, chunk_server.rpc_port);
 
 	TCPClient tcp_client (chunk_server);
 	tcp_client.connectToServer();
+
 	grpc::ServerBuilder builder;
 	builder.AddListeningPort(grpc_connection_string(connection_options_.client), grpc::InsecureServerCredentials());
 	GFSClientServiceImplementation service;
@@ -108,19 +110,21 @@ void MicroGFS::write(std::string file_path, unsigned int offset, unsigned int si
 	 * The behavior i want is execute the script and teardown don't continue to block.
 	 *
 	 * */
-
 }
 
 int main(int argc, char *argv[])
 {
+	
+	GFSLogger::Logger main_logger;
+	main_logger.init();
 
 	client_master_connection_descriptor_t connection_options;
 	connection_options.master.ip = "0.0.0.0";
 	connection_options.master.rpc_port = 5000;
 	connection_options.client.ip = "0.0.0.0";
-	connection_options.client.rpc_port = 4500;
-	connection_options.client.tcp_port = 4000;
+	connection_options.client.rpc_port = 5100;
+	connection_options.client.tcp_port = 3100;
 	MicroGFS client (connection_options);
 
-	client.write("/hello", 20, 200);
+	client.write("testfile", 20, 200, nullptr);
 }

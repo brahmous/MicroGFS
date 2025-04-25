@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <cassert>
 #include <condition_variable>
 #include <cstdint>
 #include <filesystem>
@@ -17,6 +19,8 @@
 #include <mutex>
 #include <netdb.h>
 #include <queue>
+#include <sstream>
+#include <string>
 #include <sys/types.h>
 #include <utility>
 #include <vector>
@@ -32,6 +36,7 @@
 #include "../client/generated/GFSClientService.grpc.pb.h"
 #include "../client/generated/GFSClientService.pb.h"
 
+#include "../lib/logger/logger.h"
 #include "../lib/lru_cache/lru_cache.h"
 #include "../lib/tcp/tcp_client.h"
 #include "../lib/tcp/tcp_server.h"
@@ -51,6 +56,7 @@ class ClientController;
 
 struct WriteContext {
   uint64_t handle;
+  std::size_t offset;
   std::vector<ChunkServerController> flush_list;
   tcp_rpc_server_descriptor_t forward_to;
   std::shared_ptr<ClientController> client;
@@ -62,13 +68,21 @@ struct assign_secondary_request_args {
   GFSChunkServer::AssignSecondaryResponse response;
 };
 
+struct secondary_flush_request_args_t {
+  grpc::ClientContext context;
+  GFSChunkServer::FlushRequest req;
+  GFSChunkServer::FlushResponse res;
+};
+
 class ClientController {
+public:
   ClientController(const rpc_server_descriptor_t &server_info)
       : stub_{GFSClient::GFSClientService::NewStub(
             grpc::CreateChannel(grpc_connection_string(server_info),
                                 grpc::InsecureChannelCredentials()))} {}
 
   void FlushSecondary() {}
+  void AcknowledgeDataReceipt() {}
 
 private:
   std::unique_ptr<GFSClient::GFSClientService::Stub> stub_;
@@ -86,25 +100,44 @@ public:
   void assignSecondary(std::atomic<int> &counter, std::condition_variable &cv,
                        std::mutex &mu, bool &acknowledged,
                        assign_secondary_request_args &args) {
-
     // grpc::ClientContext context;
     // GFSChunkServer::AssignSecondaryRequest req;
     // GFSChunkServer::AssignSecondaryResponse res;
     secondary_server_stub_->async()->AssignSecondary(
         &args.context, &args.request, &args.response,
         [&acknowledged, &mu, &cv, &counter, &args](grpc::Status status) {
-          MESSAGE("[LOG]: Callback Hit");
           // MESSAGE("COUNTER: " << counter);
           bool result;
           if (!status.ok()) {
             MESSAGE("NOT OK CALL TO SECONDARY");
             result = false;
           } else {
-            /*NOTE: UNCOMMENT*/ // result = args.response.acknowledgment();
+            result = args.response.body().acknowledgment();
           }
           std::lock_guard<std::mutex> lock(mu);
           counter -= 1;
           acknowledged = acknowledged && result;
+          cv.notify_one();
+        });
+  }
+
+  void Flush(secondary_flush_request_args_t &args, std::atomic<int> &counter,
+             std::mutex &mu, std::condition_variable &cv, bool &done) {
+    secondary_server_stub_->async()->Flush(
+        &(args.context), &(args.req), &(args).res,
+        [&done, &cv, &mu, &counter](grpc::Status status) {
+          bool ret = false;
+
+          if (!status.ok()) {
+            MESSAGE("forwarding flush to secondaries failed");
+            ret = false;
+          } else {
+            ret = true;
+          }
+
+          --counter;
+          std::lock_guard<std::mutex> lock(mu);
+          done = done && ret;
           cv.notify_one();
         });
   }
@@ -128,6 +161,8 @@ public:
     UploadChunkMetadata(
         grpc::CallbackServerContext *context,
         const GFSChunkServer::UploadChunkMetadataRequest *request) override {
+
+      MAINLOG_INFO("Uploading chunks metadata.");
 
       class Writer
           : public grpc::ServerWriteReactor<GFSChunkServer::ChunkMetadata> {
@@ -191,14 +226,19 @@ public:
     AssignPrimary(grpc::CallbackServerContext *context,
                   const GFSChunkServer::AssignPrimaryRequest *request,
                   GFSChunkServer::AssignPrimaryResponse *response) override {
-      // std::atomic<int> counter = request->secondary_servers().size();
+
+      MAINLOG_WARN("I'M The Primary");
+      MAINLOG_INFO(("SECONDARY LIST: {}"), request->secondary_servers().size());
       std::atomic<int> counter = request->secondary_servers().size();
-      bool acknowledged = false;
+      MAINLOG_INFO("atomic counter for number of secondary servers: {}",
+                   std::to_string(counter));
+      bool acknowledged = true;
       std::mutex mu;
       std::condition_variable cv;
 
       WriteContext write_context;
       write_context.handle = request->handle();
+      MAINLOG_INFO("setting primary handle");
 
       rpc_server_descriptor_t client_server_info;
       client_server_info.ip = request->client_server().ip();
@@ -206,11 +246,17 @@ public:
       write_context.client =
           std::make_shared<ClientController>(client_server_info);
 
+      MAINLOG_INFO("setting client server credentials to send data receipts "
+                   "acknowldegemnt to");
+
       write_context.forward_to.ip = request->forward_to().ip();
       write_context.forward_to.tcp_port = request->forward_to().tcp_port();
       write_context.forward_to.rpc_port = request->forward_to().rpc_port();
 
+      MAINLOG_INFO("setting priamry forward server credentials");
+
       for (int i = 0; i < request->secondary_servers().size(); ++i) {
+        MAINLOG_INFO(("{}: setting up flush list."), i);
         tcp_rpc_server_descriptor_t forward_server_info;
         forward_server_info.ip =
             request->secondary_servers().at(i).server_info().ip();
@@ -223,10 +269,12 @@ public:
       }
 
       std::vector<assign_secondary_request_args> args(
-          request->secondary_servers().size());
+          request->secondary_servers().size() + 1);
 
       int args_i = 0;
       for (ChunkServerController &controller : write_context.flush_list) {
+
+        MAINLOG_INFO(("{}: Assigning secondary"), args_i);
         args[args_i].request.set_write_id(request->write_id());
         args[args_i].request.set_handle(
             request->secondary_servers().at(args_i).handle());
@@ -254,14 +302,16 @@ public:
       /*NOTE: UNCOMMENT*/ // response->set_acknowledgment(acknowledged);
 
       if (acknowledged == true) {
+        MAINLOG_INFO("SECONDARY SERVER ASSIGNED");
         chunk_server_->write_id_to_context_map_.insert(
-            {request->write_id(), write_context});
+            {request->write_id(), std::move(write_context)});
         chunk_server_->chunk_dictionary_[request->handle()].leased = true;
         chunk_server_->chunk_dictionary_[request->handle()]
             .write_order_queue.push(request->write_id());
         response->set_status(GFSChunkServer::Status::SUCCESS);
         response->mutable_body()->set_acknowledgment(true);
       } else {
+        MAINLOG_ERROR("error assigning secondary server");
         response->set_status(GFSChunkServer::Status::ERROR);
         response->mutable_error()->set_error_code(2030);
         response->mutable_error()->set_error_message(
@@ -278,9 +328,40 @@ public:
         grpc::CallbackServerContext *context,
         const GFSChunkServer::AssignSecondaryRequest *request,
         GFSChunkServer::AssignSecondaryResponse *response) override {
-      /*NOTE: UNCOMMENT*/ // response->set_acknowledgment(true);
+
+      MAINLOG_WARN("I'm The Secondary");
+
+      response->mutable_body()->set_acknowledgment(true);
+      MAINLOG_INFO("Set the body acknowledgemnt to true");
+
+      //*TODO!IMPORTANT: add offset to write context and maybe size*//
+      WriteContext write_context;
+      write_context.handle = request->handle();
+      write_context.forward_to.ip = request->forward_server().ip();
+      write_context.forward_to.tcp_port = request->forward_server().tcp_port();
+      write_context.forward_to.rpc_port = request->forward_server().rpc_port();
+
+      MAINLOG_INFO("Constructed the write context");
+
+      rpc_server_descriptor_t client_server_info;
+      client_server_info.ip = request->client_server().ip();
+      client_server_info.rpc_port = request->client_server().rpc_port();
+      write_context.client =
+          std::make_shared<ClientController>(client_server_info);
+
+      MAINLOG_INFO("Constructed the write context client");
+
+      chunk_server_->write_id_to_context_map_.insert(
+          std::make_pair(request->write_id(), std::move(write_context)));
+
+      MAINLOG_INFO("Insert the write context using write id: {}",
+                   request->write_id());
+
+      response->set_status(GFSChunkServer::Status::SUCCESS);
+      response->mutable_body()->set_acknowledgment(true);
       auto *reactor = context->DefaultReactor();
       reactor->Finish(grpc::Status::OK);
+      MAINLOG_INFO("sending back the acknowledgement");
       return reactor;
     }
 
@@ -289,84 +370,44 @@ public:
           const GFSChunkServer::FlushRequest *request,
           GFSChunkServer::FlushResponse *response) override {
       /*Just to avoid errors for now*/
-      if (true) {
-        // if (server_info_.rpc_port == /*primary port*/ 6000) {
+      WriteContext &write_context =
+          chunk_server_->write_id_to_context_map_.find(request->write_id())
+              ->second;
 
+      if (chunk_server_->chunk_dictionary_.find(write_context.handle)
+              ->second.leased) {
+        // if (server_info_.rpc_port == /*primary port*/ 6000) {
         std::mutex mu;
 
-        struct secondary_flush_request_args_t {
-          grpc::ClientContext context;
-          GFSChunkServer::FlushRequest req;
-          GFSChunkServer::FlushResponse res;
-        };
+        /*Flush buffer then forward flush request*/
 
         std::vector<secondary_flush_request_args_t>
             secondary_flush_request_args(3);
 
-        std::vector<std::unique_ptr<GFSChunkServer::ChunkServerService::Stub>>
-            stubs;
-        std::atomic<int> counter = stubs.size();
-
-        tcp_rpc_server_descriptor_t server1_info;
-        server1_info.ip = "0.0.0.0";
-        server1_info.rpc_port = 6501;
-        server1_info.tcp_port = 6001;
-        tcp_rpc_server_descriptor_t server2_info;
-        server2_info.ip = "0.0.0.0";
-        server2_info.rpc_port = 6502;
-        server2_info.tcp_port = 6002;
-        tcp_rpc_server_descriptor_t server3_info;
-        server2_info.ip = "0.0.0.0";
-        server2_info.rpc_port = 6503;
-        server2_info.tcp_port = 6003;
-
-        stubs.emplace_back(GFSChunkServer::ChunkServerService::NewStub(
-            grpc::CreateChannel(grpc_connection_string(server1_info),
-                                grpc::InsecureChannelCredentials())));
-        stubs.emplace_back(GFSChunkServer::ChunkServerService::NewStub(
-            grpc::CreateChannel(grpc_connection_string(server2_info),
-                                grpc::InsecureChannelCredentials())));
-        stubs.emplace_back(GFSChunkServer::ChunkServerService::NewStub(
-            grpc::CreateChannel(grpc_connection_string(server3_info),
-                                grpc::InsecureChannelCredentials())));
+        std::atomic<int> counter = write_context.flush_list.size();
 
         std::condition_variable cv;
         bool done = false;
 
         int args_i = 0;
-        for (std::unique_ptr<GFSChunkServer::ChunkServerService::Stub> &stub :
-             stubs) {
-          stub->async()->Flush(
-              &secondary_flush_request_args[args_i].context,
-              &secondary_flush_request_args[args_i].req,
-              &secondary_flush_request_args[args_i].res,
-              [&done, &cv, &mu, &counter](grpc::Status status) {
-                bool ret = false;
 
-                if (!status.ok()) {
-                  MESSAGE("forwarding flush to secondaries failed");
-                  ret = false;
-                } else {
-                  ret = true;
-                }
-
-                --counter;
-                std::lock_guard<std::mutex> lock(mu);
-                done = done && ret;
-                cv.notify_one();
-              });
-
+        for (ChunkServerController &chunk_server_controller :
+             write_context.flush_list) {
+          chunk_server_controller.Flush(secondary_flush_request_args[args_i],
+                                        counter, mu, cv, done);
           ++args_i;
         }
 
         std::unique_lock<std::mutex> lock(mu);
         cv.wait(lock, [&counter, &done] { return (counter == 0 and done); });
-        response->set_flushed(true);
+        response->set_status(GFSChunkServer::Status::SUCCESS);
+        response->mutable_body()->set_acknowledgement(true);
         auto *reactor = context->DefaultReactor();
         reactor->Finish(grpc::Status::OK);
         return reactor;
       } else {
-        response->set_flushed(true);
+        response->set_status(GFSChunkServer::Status::SUCCESS);
+        response->mutable_body()->set_acknowledgement(true);
         auto *reactor = context->DefaultReactor();
         reactor->Finish(grpc::Status::OK);
         return reactor;
@@ -377,8 +418,10 @@ public:
     ChunkServer *chunk_server_;
   };
 
-  ChunkServer(const chunkserver_master_connection_descriptor_t &server_info)
-      : chunkserver_master_connection_info_{server_info},
+  ChunkServer(const chunk_server_config_t &config)
+      : chunkserver_master_connection_info_{config
+                                                .chunkserver_master_connection_info},
+        storage_folder_path_{config.storage_file_path},
         chunk_server_service_{this}, buffer_cache{8, 8096},
         master_stub_{GFSMaster::ChunkServerService::NewStub(
             grpc::CreateChannel(grpc_connection_string<rpc_server_descriptor_t>(
@@ -404,6 +447,8 @@ public:
     GFSMaster::RegisterChunkServerRequest request;
     request.mutable_server_info()->set_ip(
         chunkserver_master_connection_info_.chunk_server.ip);
+    request.mutable_server_info()->set_tcp_port(
+        chunkserver_master_connection_info_.chunk_server.tcp_port);
     request.mutable_server_info()->set_rpc_port(
         chunkserver_master_connection_info_.chunk_server.rpc_port);
 
@@ -440,7 +485,7 @@ public:
 
 private:
   void load_chunks_from_filesystem() {
-    std::filesystem::path chunks_folder{"/home/nitro/.local/share/gfs/"};
+    std::filesystem::path chunks_folder{storage_folder_path_};
     for (auto const &directory_entry :
          std::filesystem::directory_iterator(chunks_folder)) {
       std::string path = directory_entry.path();
@@ -472,6 +517,7 @@ private:
   std::map<uint64_t, ChunkDescriptor> chunk_dictionary_;
   std::unordered_map<int, WriteContext> write_id_to_context_map_;
   GFSLRUCache buffer_cache;
+  std::string storage_folder_path_;
 
   /*LRUCache...
    * map:- write id -> buffer
@@ -487,7 +533,11 @@ private:
 void tcp_server_worker(ChunkServer *chunk_server) {
   TCPServer tcp_server(
       chunk_server->chunkserver_master_connection_info_.chunk_server);
+
+  /*TCP Data Transfer Lambda*/
   tcp_server.wait([chunk_server](int socket) {
+    /*deserialize write id from stream and use it to get write context and issue
+     * an acknowldgement of data receipt*/
     tcp_rpc_server_descriptor_t next_chunk_server =
         chunk_server->chunkserver_master_connection_info_.chunk_server;
     next_chunk_server.tcp_port++;
@@ -512,16 +562,17 @@ void tcp_server_worker(ChunkServer *chunk_server) {
 }
 
 int main(int argc, char *argv[]) {
-  if (argc < 11) {
+  GFSLogger::Logger::init();
+  if (argc < 12) {
     MESSAGE_END_EXIT(
         "USAGE: ./server --ip <ipv4-address> --rpc-port <port> --tcp-port "
-        "<port> --master-ip <ipv4-address> --master-port <port> ");
+        "<port> --master-ip <ipv4-address> --master-port <port> "
+        "--storage-folder <storage folder path>");
   }
-  chunkserver_master_connection_descriptor_t
-      chunkserver_master_connection_info = parse_cli_args(argv + 1, argc - 1);
   // std::cout << chunkserver_master_connection_info << "\n";
-
-  ChunkServer main_server(chunkserver_master_connection_info);
+  chunk_server_config_t config = parse_cli_args(argv + 1, argc - 1);
+  ;
+  ChunkServer main_server(config);
   /* Announce to the master */
   main_server.Announce();
   main_server.start();

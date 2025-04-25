@@ -22,7 +22,7 @@ public:
 		MESSAGE("[LOG]: master stub created.");
 	}
 
-	void write(std::string file_path, unsigned int offset, unsigned int size);
+	void write(std::string file_path, unsigned int offset, unsigned int buffer_size, const char * buffer);
 
 private:
 	client_master_connection_descriptor_t connection_options_;
