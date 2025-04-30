@@ -2,6 +2,7 @@
 #define CLIENT_TCP_H
 
 #include "../../headers/main.h"
+#include "../logger/logger.h"
 #include <arpa/inet.h>
 #include <cstring>
 #include <netinet/in.h>
@@ -36,7 +37,19 @@ public:
 		EXIT_IF_TRUE(connect_error_code < 0, "establishing connection failed!");
 	}
 
-	void write(std::string write_id, const char * buffer, size_t buffer_size);
+	void write(void * buffer, size_t buffer_size) {
+		ssize_t number_of_bytes_sent = send(socket_, buffer, buffer_size, 0);
+		if (number_of_bytes_sent == buffer_size) {
+			MAINLOG_INFO("sent all bytes");
+		} else {
+			MAINLOG_INFO("didn't send all bytes! number of bytes sent: {}", number_of_bytes_sent);
+		}
+		/*
+		while (number_of_bytes_sent != buffer_size) {
+			number_of_bytes_sent += send(socket_, buffer, buffer_size, 0);
+		}
+		*/
+	}
 
 private:
 	int socket_;

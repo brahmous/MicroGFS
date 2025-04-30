@@ -8,6 +8,9 @@
 #include <grpcpp/channel.h>
 #include <grpcpp/server_context.h>
 
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <grpcpp/client_context.h>
 #include <grpcpp/create_channel.h>
 #include <grpcpp/security/credentials.h>
@@ -382,7 +385,6 @@ public:
           std::make_pair(request->write_id(), std::move(write_context)));
 
       chunk_server_->buffer_cache.put(request->write_id());
-
       MAINLOG_INFO("(23) Allocated buffer on LRU cache with write id: {}",
                    request->write_id());
 
@@ -567,9 +569,16 @@ void tcp_server_worker(ChunkServer *chunk_server) {
   tcp_server.wait([chunk_server](int socket) {
     /*deserialize write id from stream and use it to get write context and issue
      * an acknowldgement of data receipt*/
+
+		char write_id_buffer[sizeof(int)];
+		recv(socket, write_id_buffer, 4, 0);
+
+		MAINLOG_INFO("WRITE ID RECEIVED: {}", *(reinterpret_cast<int *>(write_id_buffer)));
+		/*
     tcp_rpc_server_descriptor_t next_chunk_server =
         chunk_server->chunkserver_master_connection_info_.chunk_server;
     next_chunk_server.tcp_port++;
+
 
     if (next_chunk_server.tcp_port < 6004) {
       TCPClient client{next_chunk_server};
@@ -585,8 +594,8 @@ void tcp_server_worker(ChunkServer *chunk_server) {
     grpc::ClientContext context;
     GFSClient::AcknowledgeDataReceiptRequest request;
     GFSClient::AcknowledgeDataReceiptResponse response;
-
     client_stub->AcknowledgeDataReceipt(&context, request, &response);
+		*/
   });
 }
 

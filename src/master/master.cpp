@@ -128,7 +128,7 @@ private:
   /*Sequence Counter*/
   std::atomic<int> file_id_counter_ = 0;
   std::atomic<int> chunk_server_id_counter_ = 0;
-  std::atomic<int> write_id_counter_ = 0;
+  std::atomic<int> write_id_counter_ = 25;
   std::atomic<uint64_t> handle_counter_ = 0;
 };
 
