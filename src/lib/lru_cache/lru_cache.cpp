@@ -1,4 +1,5 @@
 #include "./lru_cache.h"
+#include "../logger/logger.h"
 #include <stdexcept>
 #include <utility>
 
@@ -20,6 +21,7 @@ void GFSLRUCache::put(int write_id) {
 			map.erase(list.back().first);
 			list.pop_back();
 		}
+		return;
 	}
 	throw std::runtime_error("impossible of the same write id to be used twice");
 };

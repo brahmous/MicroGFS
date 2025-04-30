@@ -303,6 +303,12 @@ void ChunkServerController::AssignLease(
   assert(write_coordinates.chunk_server_handle_list.size() > 1 &&
          "there is only one server involved in a write");
 
+  MAINLOG_INFO(
+      "(12) primary forwards to: (ip: {}, tcp_port: {}, rpc_port: {})",
+      write_coordinates.chunk_server_handle_list[1].server_info.ip,
+      write_coordinates.chunk_server_handle_list[1].server_info.tcp_port,
+      write_coordinates.chunk_server_handle_list[1].server_info.rpc_port);
+
   request.mutable_forward_to()->set_ip(
       write_coordinates.chunk_server_handle_list[1].server_info.ip);
   request.mutable_forward_to()->set_rpc_port(
@@ -346,12 +352,9 @@ void ChunkServerController::AssignLease(
    * 2->3
    * i<size-1
    * */
-  MAINLOG_ERROR("AssignLease 1");
+  MAINLOG_ERROR("(13) Assign primary call issued to primary chunk server.");
   chunk_server_stub_->AssignPrimary(&context, request, &response);
-  MAINLOG_ERROR("AssignLease 2");
   acknowledged = response.body().acknowledgment();
-  MESSAGE("ACK: " << acknowledged);
-  MAINLOG_ERROR("AssignLease 3");
 }
 
 tcp_rpc_server_descriptor_t ChunkServerController::server_info() {
@@ -472,23 +475,22 @@ grpc::ServerUnaryReactor *Master::GFSMasterServiceImplementation::Write(
     const GFSMaster::WriteRequest *request,
     GFSMaster::WriteResponse *response) {
 
-  for (auto controller : master->data_servers_) {
-    std::cout << "Server id: " << controller.first
-              << " \nserver ip: " << controller.second.server_info_.ip
-              << "\nrpc_port: " << controller.second.server_info_.rpc_port
-              << "\n";
-  }
-
-  MAINLOG_INFO("Write API call invoked");
+  MAINLOG_INFO("(2) Write API call invoked");
   GFSNameSpace::write_coordinate write_coordinates;
 
   write_coordinates.setClient(&request->client_server_info());
+  MAINLOG_INFO("(3) Setting client coordinates: client ip: {}, client tcp "
+               "port: {}, client rpc port {}",
+               write_coordinates.client_server_info.ip,
+               write_coordinates.client_server_info.tcp_port,
+               write_coordinates.client_server_info.rpc_port);
 
   /*Check if we have sufficient servers*/
   std::size_t write_replica_count = std::min(
       master->chunk_server_ordering_.size(), master->number_of_replicas);
-
-  std::cout << "Replica Count: " << write_replica_count << "\n";
+  MAINLOG_INFO(
+      "(4) nummber of connected chunk servers: {}, write replica count: {}",
+      master->chunk_server_ordering_.size(), write_replica_count);
 
   if (master->chunk_server_ordering_.size() < master->number_of_replicas) {
     /*
@@ -509,12 +511,15 @@ grpc::ServerUnaryReactor *Master::GFSMasterServiceImplementation::Write(
   /*
    * Obtaining the file ID from the file path.
    * */
+
+  MAINLOG_INFO("(5) Retreaving file structure from namespace ");
   if (auto find_result = master->file_name_to_integer_index.find(file_path);
       find_result != master->file_name_to_integer_index.end()) {
     found = true;
     file_id = find_result->second;
+    /*TODO: pretty print GFSFile*/
   } else {
-    MAINLOG_ERROR("FILE NOT FOUND!!");
+    MAINLOG_ERROR("(6) FILE NOT FOUND!!");
   }
 
   if (found) {
@@ -523,16 +528,26 @@ grpc::ServerUnaryReactor *Master::GFSMasterServiceImplementation::Write(
     int chunk_index;
     write_coordinates.write_offset = request->offset() % file.chunk_size;
 
+    MAINLOG_INFO("(6) GFSFile retrieved! file id: {}, file size: {}", file_id,
+                 file.size);
+
     /*FIle is empty*/
     if (file.size == 0) {
       chunk_index = 0;
       /*Get new Coordinate ID*/
       write_coordinates.write_id = master->write_id_counter_++;
+      MAINLOG_INFO("(7) Generating write id! write id {}",
+                   write_coordinates.write_id);
 
       /*Heapifty to select the best chunk servers*/
       std::make_heap(master->chunk_server_ordering_.begin(),
                      master->chunk_server_ordering_.end(),
                      chunk_server_priority_comparator(&master->data_servers_));
+
+      MAINLOG_INFO("(8) [Since new chunks are being written we choose where to "
+                   "assign them using priority queue] Constructing priority "
+                   "queue! selection pool size: {}",
+                   master->chunk_server_ordering_.size());
 
       /* Put the selected servers in the write coordinates,
        * The first server is the primary*/
@@ -542,6 +557,9 @@ grpc::ServerUnaryReactor *Master::GFSMasterServiceImplementation::Write(
              master->data_servers_.find(master->chunk_server_ordering_[i])
                  ->second.server_info_});
       }
+
+      MAINLOG_INFO("(9) number of selected servers: {}",
+                   write_coordinates.chunk_server_handle_list.size());
 
       assert(write_coordinates.chunk_server_handle_list.size() == 2 &&
              "write coordinates has 2 servers primary and one secondary");
@@ -556,13 +574,22 @@ grpc::ServerUnaryReactor *Master::GFSMasterServiceImplementation::Write(
       "\n";;
       }
       */
+      tcp_rpc_server_descriptor_t selected_primary =
+          master->data_servers_.find(master->chunk_server_ordering_[0])
+              ->second.server_info();
 
+      MAINLOG_INFO(
+          "(10) Primary server selected! ip: {}, tcp_port: {}, rpc_port: {}",
+          selected_primary.ip, selected_primary.tcp_port,
+          selected_primary.rpc_port);
+
+      MESSAGE("(11) Lease Assignment process started!");
       /* Assign Lease to the primary*/
       master->data_servers_.find(master->chunk_server_ordering_[0])
           ->second.AssignLease(write_coordinates, acknowledged);
-      MAINLOG_INFO((std::stringstream("after assign lease (ack: ")
-                    << acknowledged << "\n")
-                       .str());
+
+      MAINLOG_INFO("(27) Lease Assigned (ack: {})",
+                   (acknowledged ? "TRUE" : "FALSE"));
     } else {
       chunk_index = file.size / file.chunk_size;
       /*we have the chunk index*/
@@ -609,9 +636,13 @@ grpc::ServerUnaryReactor *Master::GFSMasterServiceImplementation::Write(
   }
 
   if (acknowledged) {
+    MAINLOG_INFO(
+        "(27) Primary assigned, responding to client with server credentials");
+
     response->mutable_response_body()->set_write_id(write_coordinates.write_id);
     tcp_rpc_server_descriptor_t &primary =
         write_coordinates.chunk_server_handle_list.front().server_info;
+
     response->set_status(::GFSMaster::Status::SUCCESS);
     response->mutable_response_body()->mutable_primary_server()->set_ip(
         primary.ip);
@@ -619,7 +650,14 @@ grpc::ServerUnaryReactor *Master::GFSMasterServiceImplementation::Write(
         primary.tcp_port);
     response->mutable_response_body()->mutable_primary_server()->set_rpc_port(
         primary.rpc_port);
-    for (int i = 1; i < write_replica_count; ++i) {
+
+    MAINLOG_INFO(
+        "Write id: {}, primary server: [ip: {}, tcp port: {}, rpc port: {}]",
+        write_coordinates.write_id, primary.ip, primary.tcp_port,
+        primary.rpc_port);
+
+    for (int i = 1; i < write_coordinates.chunk_server_handle_list.size();
+         ++i) {
       auto response_secondary_server =
           response->mutable_response_body()->mutable_secondary_servers()->Add();
       tcp_rpc_server_descriptor_t &secondary_server =
@@ -627,9 +665,12 @@ grpc::ServerUnaryReactor *Master::GFSMasterServiceImplementation::Write(
       response_secondary_server->set_ip(secondary_server.ip);
       response_secondary_server->set_tcp_port(secondary_server.tcp_port);
       response_secondary_server->set_rpc_port(secondary_server.rpc_port);
+      MAINLOG_INFO("Secondary server: [ip: {}, tcp port: {}, rpc port {}]",
+                   secondary_server.ip, secondary_server.tcp_port,
+                   secondary_server.rpc_port);
     }
   } else {
-    MAINLOG_ERROR("ERROR no acknowldegement");
+    MAINLOG_ERROR("(27) Primary not assigned, responding to client with error");
     response->set_status(::GFSMaster::Status::ERROR);
     response->mutable_error()->set_error_code(2000);
     response->mutable_error()->set_error_message("Lease assignment failed!");

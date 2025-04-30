@@ -23,6 +23,7 @@ public:
 	}
 
 	void write(std::string file_path, unsigned int offset, unsigned int buffer_size, const char * buffer);
+	void read(std::string file_name, unsigned int offset, unsigned int number_of_bytes, char * buffer);
 
 private:
 	client_master_connection_descriptor_t connection_options_;
