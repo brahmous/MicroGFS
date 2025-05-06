@@ -3,6 +3,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <grpcpp/client_context.h>
 #include <grpcpp/create_channel.h>
@@ -13,6 +14,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <print>
 #include <spdlog/logger.h>
 #include <sstream>
 #include <string>
@@ -108,8 +110,8 @@ private:
   /* Services */
   GFSMasterServiceImplementation master_service_;
 
-  const unsigned long number_of_replicas;
-  const unsigned long chunk_size;
+  const unsigned long number_of_replicas_;
+  const unsigned long chunk_size_;
 
   /*Name Space */
   std::unordered_map<std::string, int> file_name_to_integer_index;
@@ -128,49 +130,59 @@ private:
   /*Sequence Counter*/
   std::atomic<int> file_id_counter_ = 0;
   std::atomic<int> chunk_server_id_counter_ = 0;
-  std::atomic<int> write_id_counter_ = 25;
+  std::atomic<int> write_id_counter_ = 55;
   std::atomic<uint64_t> handle_counter_ = 0;
 };
 
-void print_gfsfile(const GFSNameSpace::GFSFile &file) {
+void print_gfsfile(std::string file_name, const GFSNameSpace::GFSFile &file) {
 
   std::ostream &out = std::cout;
   std::stringstream output;
 
-  output << "Mode: "
+  output << "File Name: " << file_name << "\n";
+  output << "File Mode: "
          << (file.mode == GFSNameSpace::GFSFileType::NORMAL ? "Normal"
                                                             : "Atomic Append")
          << "\n";
   output << "File Size: " << file.size << "\n";
 
-  int chunk_counter = 0;
-  for (const GFSNameSpace::chunk_descriptor &chunk : file.chunks) {
-    output << "###### Chunk index: " << chunk_counter << "######\n";
-    output << "Chunk Size :" << chunk.size << "\n";
+  if (file.chunks.size() == 0) {
+    MAINLOG_INFO("file is empty!");
+  } else {
+    int chunk_counter = 0;
+    for (const GFSNameSpace::chunk_descriptor &chunk : file.chunks) {
+      output << "Chunk: " << chunk_counter << "\n";
+      output << "\tChunk Size :" << chunk.size << "\n";
+      output << "\tLease Host ID: " << chunk.lease.host_id << "\n";
+      output << "\tLease Issued At: " << chunk.lease.issued_at << "\n";
 
-    output << "#### Chunk Replicas. ####\n";
-    output << "Lease Host ID: " << chunk.lease.host_id << "\n";
-    output << "Lease Issued At: " << chunk.lease.issued_at << "\n";
-
-    int chunk_replica_index = 0;
-    for (const GFSNameSpace::chunk_replica_descriptor &chunk_replica :
-         chunk.replicas) {
-      output << "## Chunk Replicas: " << chunk_replica_index << "##\n";
-      output << "Replica Handle: " << chunk_replica.handle << "\n";
-      output << "Host Id: " << chunk_replica.host_id << "\n";
-      chunk_replica_index++;
+      int chunk_replica_index = 0;
+      for (const GFSNameSpace::chunk_replica_descriptor &chunk_replica :
+           chunk.replicas) {
+        output << "\t\tChunk Replica: " << chunk_replica_index << "##\n";
+        output << "\t\t\tReplica Handle: " << chunk_replica.handle << "\n";
+        output << "\t\t\tHost Id: " << chunk_replica.host_id << "\n";
+        chunk_replica_index++;
+      }
+      chunk_counter++;
     }
-    chunk_counter++;
   }
   out << output.str() << "\n";
 }
 
 void print_chunk_to_file_map(
     const std::map<uint64_t, std::tuple<int, int, int>> &map) {
-  for (auto it : map) {
-    std::cout << it.first << " : file_index (" << std::get<0>(it.second)
-              << "), chunk_index (" << std::get<1>(it.second)
-              << "), chunk_replica_index (" << std::get<2>(it.second) << "\n";
+  if (map.size() == 0) {
+    MAINLOG_INFO("index map is empty!");
+  } else {
+
+    for (auto it : map) {
+      std::cout << "handle: " << it.first
+                << "\n\tfile index: " << std::get<0>(it.second)
+                << "\n\tchunk index: " << std::get<1>(it.second)
+                << "\n\tchunk replica index: " << std::get<2>(it.second)
+                << "\n";
+    }
   }
 }
 
@@ -227,19 +239,34 @@ auto [file_id, chunk_index, replica_index] =
 master_->chunk_to_in_file_position_.find(chunk_metadata_.handle())
 ->second;
     */
-    int file_id;
-    int chunk_index;
-    int replica_index;
+    uint64_t handle = chunk_metadata_.handle();
 
-    std::tie(file_id, chunk_index, replica_index) =
-        master_->chunk_to_in_file_position_.find(chunk_metadata_.handle())
-            ->second;
+    if (auto chunk_in_file_position_fr =
+            master_->chunk_to_in_file_position_.find(handle);
+        chunk_in_file_position_fr !=
+        master_->chunk_to_in_file_position_.end()) {
 
-    master_->file_namespace_[file_id]
-        .chunks[chunk_index]
-        .replicas[replica_index]
-        .host_id = host_id_;
+      int file_id;
+      int chunk_index;
+      int replica_index;
 
+      std::tie(file_id, chunk_index, replica_index) =
+          chunk_in_file_position_fr->second;
+
+      /*
+std::tie(file_id, chunk_index, replica_index) =
+master_->chunk_to_in_file_position_.find(chunk_metadata_.handle())
+->second;
+      */
+
+      master_->file_namespace_[file_id]
+          .chunks[chunk_index]
+          .replicas[replica_index]
+          .host_id = host_id_;
+
+    } else {
+      MAINLOG_ERROR("Uploaded chunk is not recognized by the master! ");
+    }
     StartRead(&chunk_metadata_);
   }
 }
@@ -294,6 +321,7 @@ void ChunkServerController::AssignLease(
   request.set_write_id(write_coordinates.write_id);
   request.set_handle(write_coordinates.chunk_server_handle_list.front().handle);
   request.set_offset(write_coordinates.write_offset);
+  request.set_write_size(write_coordinates.write_size);
 
   request.mutable_client_server()->set_ip(
       write_coordinates.client_server_info.ip);
@@ -479,6 +507,9 @@ grpc::ServerUnaryReactor *Master::GFSMasterServiceImplementation::Write(
   GFSNameSpace::write_coordinate write_coordinates;
 
   write_coordinates.setClient(&request->client_server_info());
+  /*HERE: Write size*/
+  write_coordinates.write_size = request->data_size();
+
   MAINLOG_INFO("(3) Setting client coordinates: client ip: {}, client tcp "
                "port: {}, client rpc port {}",
                write_coordinates.client_server_info.ip,
@@ -487,12 +518,12 @@ grpc::ServerUnaryReactor *Master::GFSMasterServiceImplementation::Write(
 
   /*Check if we have sufficient servers*/
   std::size_t write_replica_count = std::min(
-      master->chunk_server_ordering_.size(), master->number_of_replicas);
+      master->chunk_server_ordering_.size(), master->number_of_replicas_);
   MAINLOG_INFO(
       "(4) nummber of connected chunk servers: {}, write replica count: {}",
       master->chunk_server_ordering_.size(), write_replica_count);
 
-  if (master->chunk_server_ordering_.size() < master->number_of_replicas) {
+  if (master->chunk_server_ordering_.size() < master->number_of_replicas_) {
     /*
      * - Could optimistically move on and write on a smaller number of
      * servers and at somepoint later this would be considered lost chunks
@@ -525,16 +556,26 @@ grpc::ServerUnaryReactor *Master::GFSMasterServiceImplementation::Write(
   if (found) {
     GFSNameSpace::GFSFile &file = master->file_namespace_.find(file_id)->second;
 
-    int chunk_index;
+    // The 4 is the size of write id.
+    // Example: if chunk size = 4096 then request->data_size() = 5000 = 4096 + 4
+    // int write_size = request->data_size() - 4;
+    MAINLOG_INFO("({}) :: file size at write: {}", "WRITE OP DEBUG", file.size);
+    int chunk_index = file.size / master->chunk_size_;
+    MAINLOG_INFO("({}) :: chunk index: {}", "WRITE OP DEBUG", chunk_index);
+
     write_coordinates.write_offset = request->offset() % file.chunk_size;
+    MAINLOG_INFO("({}) :: write coordinate write offset: {}", "WRITE OP DEBUG",
+                 write_coordinates.write_offset);
 
     MAINLOG_INFO("(6) GFSFile retrieved! file id: {}, file size: {}", file_id,
                  file.size);
 
     /*FIle is empty*/
-    if (file.size == 0) {
-      chunk_index = 0;
-      /*Get new Coordinate ID*/
+    MAINLOG_INFO("({}) :: file.chunks.size(): {}", "WRITE OP DEBUG",
+                 file.chunks.size());
+    if (chunk_index == file.chunks.size()) {
+      MAINLOG_ERROR("NEW CHUNK");
+      /*Get new Coordinate write ID*/
       write_coordinates.write_id = master->write_id_counter_++;
       MAINLOG_INFO("(7) Generating write id! write id {}",
                    write_coordinates.write_id);
@@ -551,12 +592,25 @@ grpc::ServerUnaryReactor *Master::GFSMasterServiceImplementation::Write(
 
       /* Put the selected servers in the write coordinates,
        * The first server is the primary*/
+
+      file.size += write_coordinates.write_size - 4;
+      GFSNameSpace::chunk_descriptor new_chunk_desc;
+			new_chunk_desc.lease.host_id = master->chunk_server_ordering_.front();
+			new_chunk_desc.lease.write_id = write_coordinates.write_id;
+			/*NOTE: assign lease issued at here.*/
+
       for (int i = 0; i < write_replica_count; ++i) {
+        int host_id = master->chunk_server_ordering_[i];
+        uint64_t handle = master->handle_counter_++;
+
+				new_chunk_desc.replicas.push_back({handle, host_id});
+
         write_coordinates.chunk_server_handle_list.push_back(
-            {master->handle_counter_++,
-             master->data_servers_.find(master->chunk_server_ordering_[i])
-                 ->second.server_info_});
+            {handle, master->data_servers_.find(host_id)->second.server_info_});
       }
+
+      file.chunks.push_back(new_chunk_desc);
+			print_gfsfile("hamlet.txt", file);
 
       MAINLOG_INFO("(9) number of selected servers: {}",
                    write_coordinates.chunk_server_handle_list.size());
@@ -694,13 +748,14 @@ grpc::ServerUnaryReactor *Master::GFSMasterServiceImplementation::Write(
 
 Master::Master(const master_server_config_t &master_config)
     : server_info_(master_config.server_info),
-      number_of_replicas{master_config.number_of_replicas},
-      chunk_size{master_config.chunk_size},
+      number_of_replicas_{master_config.number_of_replicas},
+      chunk_size_{master_config.chunk_size},
       chunk_servers_controllers_{
           std::make_shared<std::vector<ChunkServerController>>()},
       chunk_servers_heartbeat_threads_{
           std::make_shared<std::vector<std::thread>>()},
       master_service_{this} {
+  MAINLOG_INFO("FROM CONSTRUCTOR CHUNK SIZE: {}", chunk_size_);
   chunk_servers_controllers_->reserve(100);
   grpc::ServerBuilder builder_;
   builder_.AddListeningPort(grpc_connection_string(master_config.server_info),
@@ -715,38 +770,42 @@ Master::Master(const master_server_config_t &master_config)
   file.mode = GFSNameSpace::GFSFileType::NORMAL;
   file.size = 0;
   file.chunk_size = 4096;
-  GFSNameSpace::chunk_replica_descriptor chunk1_replica1{1111111, -1};
-  GFSNameSpace::chunk_replica_descriptor chunk1_replica2{3333333, -1};
-  GFSNameSpace::chunk_descriptor chunk1;
-  chunk1.replicas.push_back(chunk1_replica1);
-  chunk1.replicas.push_back(chunk1_replica2);
-  GFSNameSpace::chunk_replica_descriptor chunk2_replica1{2222222, -1};
-  GFSNameSpace::chunk_replica_descriptor chunk2_replica2{4444444, -1};
-  GFSNameSpace::chunk_descriptor chunk2;
-  chunk2.replicas.push_back(chunk2_replica1);
-  chunk2.replicas.push_back(chunk2_replica2);
-  file.chunks.push_back(chunk1);
-  file.chunks.push_back(chunk2);
 
-  file_name_to_integer_index.insert(std::make_pair("testfile", 1));
-  integer_index_to_file_name.insert(std::make_pair(1, "testfile"));
+  /*
+GFSNameSpace::chunk_replica_descriptor chunk1_replica1{1111111, -1};
+GFSNameSpace::chunk_replica_descriptor chunk1_replica2{3333333, -1};
+GFSNameSpace::chunk_descriptor chunk1;
+chunk1.replicas.push_back(chunk1_replica1);
+chunk1.replicas.push_back(chunk1_replica2);
+GFSNameSpace::chunk_replica_descriptor chunk2_replica1{2222222, -1};
+GFSNameSpace::chunk_replica_descriptor chunk2_replica2{4444444, -1};
+GFSNameSpace::chunk_descriptor chunk2;
+chunk2.replicas.push_back(chunk2_replica1);
+chunk2.replicas.push_back(chunk2_replica2);
+file.chunks.push_back(chunk1);
+file.chunks.push_back(chunk2);
+  */
 
-  chunk_to_in_file_position_.insert(
-      std::make_pair(1111111, std::make_tuple(1, 0, 0)));
-  chunk_to_in_file_position_.insert(
-      std::make_pair(3333333, std::make_tuple(1, 0, 1)));
-  chunk_to_in_file_position_.insert(
-      std::make_pair(2222222, std::make_tuple(1, 1, 0)));
-  chunk_to_in_file_position_.insert(
-      std::make_pair(4444444, std::make_tuple(1, 1, 1)));
+  file_name_to_integer_index.insert(std::make_pair("hamlet.txt", 1));
+  integer_index_to_file_name.insert(std::make_pair(1, "hamlet.txt"));
+
+  /*
+chunk_to_in_file_position_.insert(
+std::make_pair(1111111, std::make_tuple(1, 0, 0)));
+chunk_to_in_file_position_.insert(
+std::make_pair(3333333, std::make_tuple(1, 0, 1)));
+chunk_to_in_file_position_.insert(
+std::make_pair(2222222, std::make_tuple(1, 1, 0)));
+chunk_to_in_file_position_.insert(
+std::make_pair(4444444, std::make_tuple(1, 1, 1)));
+*/
 
   file_namespace_.insert({1, std::move(file)});
   /*END NOTE*/
 
-  int file_index = file_name_to_integer_index.find("testfile")->second;
+  int file_index = file_name_to_integer_index.find("hamlet.txt")->second;
 
-  std::cout << "testfile\n";
-  print_gfsfile(file_namespace_.find(file_index)->second);
+  print_gfsfile("hamlet.txt", file_namespace_.find(file_index)->second);
   print_chunk_to_file_map(chunk_to_in_file_position_);
 }
 
@@ -779,7 +838,7 @@ void Master::heartbeat_worker(int host_id, Master *master) {
       master->data_servers_.find(host_id)->second;
   sleep(2);
   controller.ReadChunkMetadata(master, host_id);
-  print_gfsfile(master->file_namespace_.find(1)->second);
+  print_gfsfile("testfile", master->file_namespace_.find(1)->second);
   int count = 100;
   while (--count > 0) {
     sleep(2);
@@ -793,14 +852,17 @@ int main(int argc, char *argv[]) {
 
   GFSLogger::Logger::init();
 
-  if (argc < 7 or argc > 7) {
+  if (argc < 9 or argc > 9) {
     MESSAGE_END_EXIT("USAGE: ./master --ip <ipv4-address> --rpc-port <port> "
-                     "--number-of-replicas <number of replicas(integer)>");
+                     "--number-of-replicas <number of replicas(integer)> "
+                     "--chunk-size <chunk size in bytes>");
   }
 
   master_server_config_t master_config;
 
   parse_cli_args(argv + 1, argc - 1, master_config);
+
+  MAINLOG_INFO("CHUNK SIZE USER SUPPLIED: {}", master_config.chunk_size);
 
   Master master(master_config);
   // MESSAGE(master_server_info);

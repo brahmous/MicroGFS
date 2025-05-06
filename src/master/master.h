@@ -25,11 +25,10 @@ public:
     client_server_info.tcp_port = request_client_server_info->tcp_port();
   };
 
-  void setChunkServerHandle8list() {};
-
   tcp_rpc_server_descriptor_t client_server_info;
   std::size_t write_offset;
   int write_id;
+	int write_size;
   std::vector<chunk_server_handle_pair> chunk_server_handle_list;
 };
 
@@ -39,9 +38,9 @@ struct chunk_replica_descriptor {
 };
 
 struct lease_descriptor {
-  int host_id;
-  int write_id;
-  double issued_at;
+  int host_id = -1;
+  int write_id = -1;
+  double issued_at = 0.0;
 };
 
 struct chunk_descriptor {

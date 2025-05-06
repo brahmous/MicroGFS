@@ -47,10 +47,11 @@ message SecondaryAndForwardServerInfo {
 message AssignPrimaryRequest {
   RpcServerIdentifier client_server = 1;
   uint32 write_id = 2;
-  uint64 handle = 3;
-  uint64 offset = 4;
-  TcpRpcServerIdentifier forward_to = 5;
-  repeated SecondaryAndForwardServerInfo secondary_servers = 6;
+  uint32 write_size = 3;
+  uint64 handle = 4;
+  uint64 offset = 5;
+  TcpRpcServerIdentifier forward_to = 6;
+  repeated SecondaryAndForwardServerInfo secondary_servers = 7;
 }
 
 message AssignPrimaryResponseBody {
@@ -68,7 +69,8 @@ message AssignSecondaryRequest {
   RpcServerIdentifier client_server = 2;
   TcpRpcServerIdentifier forward_server = 3;
   int32 write_id = 4;
-  bool forward = 5;
+  int32 write_size = 5;
+  bool forward = 6;
 }
 
 message AssignSecondaryResponseBody {

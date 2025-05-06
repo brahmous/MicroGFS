@@ -36,5 +36,4 @@ void GFSLRUCache::evict(int write_id) {
 
 	throw std::runtime_error("write id doesn't exist");
 }
-
 /*BUFFER POOL*/

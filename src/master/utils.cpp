@@ -45,7 +45,7 @@ void parse_cli_args(char * argv[], int size, master_server_config_t & config)
 		} else if (*token_it == NUMBER_OF_REPLICAS) {
 			config.number_of_replicas = atoi(((++token_it)++)->c_str());
 		} else if (*token_it == CHUNK_SIZE) {
-
+			config.chunk_size = atoi(((++token_it)++)->c_str());
 		}else {
 			MESSAGE_END_EXIT(std::string("error parsing cli arguments | \nunknown token \"").append(*token_it).append("\""));
 		}

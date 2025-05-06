@@ -3,7 +3,7 @@ syntax = "proto3";
 package GFSClient;
 
 message AcknowledgeDataReceiptRequest {
-  string write_id = 1;
+  int32 write_id = 1;
 }
 
 message AcknowledgeDataReceiptResponse {

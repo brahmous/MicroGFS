@@ -1,13 +1,19 @@
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <google/protobuf/extension_set.h>
 #include <google/protobuf/json/json.h>
 #include <google/protobuf/message.h>
 #include <grpcpp/channel.h>
 #include <grpcpp/server_context.h>
 
+#include <iostream>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -63,6 +69,7 @@ struct WriteContext {
   std::vector<ChunkServerController> flush_list;
   tcp_rpc_server_descriptor_t forward_to;
   std::shared_ptr<ClientController> client;
+  int write_size;
 };
 
 struct assign_secondary_request_args {
@@ -80,15 +87,33 @@ struct secondary_flush_request_args_t {
 class ClientController {
 public:
   ClientController(const rpc_server_descriptor_t &server_info)
-      : stub_{GFSClient::GFSClientService::NewStub(
+      : server_info_{server_info},
+        stub_{GFSClient::GFSClientService::NewStub(
             grpc::CreateChannel(grpc_connection_string(server_info),
                                 grpc::InsecureChannelCredentials()))} {}
 
-  void FlushSecondary() {}
-  void AcknowledgeDataReceipt() {}
+  void AcknowledgeDataReceipt(int write_id) {
 
-private:
+    grpc::ClientContext context;
+    GFSClient::AcknowledgeDataReceiptRequest request;
+    GFSClient::AcknowledgeDataReceiptResponse response;
+
+    request.set_write_id(write_id);
+
+    MAINLOG_INFO("set write id {}", write_id);
+
+    grpc::Status status =
+        stub_->AcknowledgeDataReceipt(&context, request, &response);
+
+    if (status.ok()) {
+      MAINLOG_INFO("ACKNOWLEDGED TO THE CLIENT");
+    } else {
+      MAINLOG_ERROR("ACKNOWLEDGEMENT TO THE CLIENT FAILED");
+    }
+  }
+
   std::unique_ptr<GFSClient::GFSClientService::Stub> stub_;
+  rpc_server_descriptor_t server_info_;
 };
 
 class ChunkServerController {
@@ -146,6 +171,7 @@ public:
   }
 
   tcp_rpc_server_descriptor_t server_info_;
+
 private:
   std::unique_ptr<GFSChunkServer::ChunkServerService::Stub>
       secondary_server_stub_;
@@ -242,6 +268,7 @@ public:
 
       WriteContext write_context;
       write_context.handle = request->handle();
+      write_context.write_size = request->write_size();
 
       rpc_server_descriptor_t client_server_info;
       client_server_info.ip = request->client_server().ip();
@@ -284,6 +311,7 @@ public:
 
       int args_i = 0;
       for (ChunkServerController &controller : write_context.flush_list) {
+        args[args_i].request.set_write_size(request->write_size());
         args[args_i].request.set_write_id(request->write_id());
         args[args_i].request.set_handle(
             request->secondary_servers().at(args_i).handle());
@@ -309,9 +337,11 @@ public:
                   .rpc_port());
         }
 
-				MAINLOG_WARN("Secondary server ip: {}", controller.server_info_.ip);
-				MAINLOG_WARN("Secondary server tcp port: {}", controller.server_info_.tcp_port);
-				MAINLOG_WARN("Secondary server rpc port: {}", controller.server_info_.rpc_port);
+        MAINLOG_WARN("Secondary server ip: {}", controller.server_info_.ip);
+        MAINLOG_WARN("Secondary server tcp port: {}",
+                     controller.server_info_.tcp_port);
+        MAINLOG_WARN("Secondary server rpc port: {}",
+                     controller.server_info_.rpc_port);
 
         controller.assignSecondary(counter, cv, mu, acknowledged, args[args_i]);
         ++args_i;
@@ -325,11 +355,33 @@ public:
       if (acknowledged == true) {
         MAINLOG_INFO(
             "(25) Secondary server acknowledged being ready to handle write");
+
         chunk_server_->write_id_to_context_map_.insert(
             {request->write_id(), std::move(write_context)});
-        chunk_server_->chunk_dictionary_[request->handle()].leased = true;
-        chunk_server_->chunk_dictionary_[request->handle()]
-            .write_order_queue.push(request->write_id());
+
+        if (auto find_result =
+                chunk_server_->chunk_dictionary_.find(request->handle());
+            find_result == chunk_server_->chunk_dictionary_.end()) {
+          auto [it, inserted] = chunk_server_->chunk_dictionary_.insert(
+              std::make_pair(request->handle(), ChunkDescriptor()));
+
+          it->second.leased = true;
+          it->second.write_order_queue.push(request->write_id());
+
+        } else {
+          find_result->second.leased = true;
+          find_result->second.write_order_queue.push(request->write_id());
+        }
+
+        // chunk_server_->chunk_dictionary_[request->handle()].leased = true;
+        // chunk_server_->chunk_dictionary_[request->handle()]
+        //    .write_order_queue.push(request->write_id());
+        //
+
+        MAINLOG_WARN("write id: {}, write size: {}", request->write_id(),
+                     request->write_size());
+        chunk_server_->buffer_cache.insert(std::make_pair(
+            request->write_id(), std::vector<char>(request->write_size())));
         response->set_status(GFSChunkServer::Status::SUCCESS);
         response->mutable_body()->set_acknowledgment(true);
       } else {
@@ -341,7 +393,6 @@ public:
             std::string("ERROR Assignging the secondary servers for write ")
                 .append(std::to_string(request->write_id())));
       }
-
       auto *reactor = context->DefaultReactor();
       reactor->Finish(grpc::Status::OK);
       MAINLOG_INFO("(26) Responding to the primary with acknowledgment");
@@ -355,6 +406,23 @@ public:
 
       MAINLOG_INFO("(19) I'm The Secondary");
 
+      uint64_t handle = request->handle();
+      int write_id = request->write_id();
+
+      if (auto chunk_dictionary_entry_fr =
+              chunk_server_->chunk_dictionary_.find(handle);
+          chunk_dictionary_entry_fr == chunk_server_->chunk_dictionary_.end()) {
+
+        auto [it, inserted] = chunk_server_->chunk_dictionary_.insert(
+            std::make_pair(handle, ChunkDescriptor()));
+        it->second.leased = false;
+        it->second.write_order_queue.push(write_id);
+      } else {
+        auto [handle_k, descriptor_v] = *chunk_dictionary_entry_fr;
+        descriptor_v.leased = false;
+        descriptor_v.write_order_queue.push(write_id);
+      }
+
       response->mutable_body()->set_acknowledgment(true);
       MAINLOG_INFO("(20) Response body set to true");
 
@@ -364,6 +432,7 @@ public:
       write_context.forward_to.ip = request->forward_server().ip();
       write_context.forward_to.tcp_port = request->forward_server().tcp_port();
       write_context.forward_to.rpc_port = request->forward_server().rpc_port();
+      write_context.write_size = request->write_size();
 
       MAINLOG_INFO("(21) Write context setup! handle {}, forward to server "
                    "[ip: {}, tcp port: {}, rpc port {}]]",
@@ -384,7 +453,10 @@ public:
       chunk_server_->write_id_to_context_map_.insert(
           std::make_pair(request->write_id(), std::move(write_context)));
 
-      chunk_server_->buffer_cache.put(request->write_id());
+      MAINLOG_WARN("write size: {}", request->write_size());
+      chunk_server_->buffer_cache.insert(std::make_pair(
+          request->write_id(), std::vector<char>(request->write_size())));
+
       MAINLOG_INFO("(23) Allocated buffer on LRU cache with write id: {}",
                    request->write_id());
 
@@ -400,49 +472,98 @@ public:
     Flush(grpc::CallbackServerContext *context,
           const GFSChunkServer::FlushRequest *request,
           GFSChunkServer::FlushResponse *response) override {
-      /*Just to avoid errors for now*/
+      MAINLOG_ERROR("FLUSH CALLED");
+
+      MAINLOG_ERROR("################ FLUSH START ####################");
+
+      MAINLOG_INFO("request write id: {}", request->write_id());
+
+      int write_id = request->write_id();
+
       WriteContext &write_context =
           chunk_server_->write_id_to_context_map_.find(request->write_id())
               ->second;
 
-      if (chunk_server_->chunk_dictionary_.find(write_context.handle)
-              ->second.leased) {
-        // if (server_info_.rpc_port == /*primary port*/ 6000) {
+      std::string str(chunk_server_->buffer_cache[request->write_id()].data());
+      MAINLOG_INFO("DATA TO BE FLUSHED TO THE DISK: {}", str);
+
+      MAINLOG_INFO("Write context:\n\thandle: {}\n\t "
+                   "client:\n\t\tip: {}\n\t\trpc port: {}\n\t\twrite size: {}",
+                   write_context.handle, write_context.client->server_info_.ip,
+                   write_context.client->server_info_.rpc_port,
+                   write_context.write_size);
+
+      ChunkDescriptor &chunk_descriptor =
+          chunk_server_->chunk_dictionary_.find(write_context.handle)->second;
+
+      MAINLOG_INFO("Chunk Descriptor:\n\tleased: {}\n\tcurrent write: {}",
+                   (chunk_descriptor.leased ? "TRUE" : "FALSE"),
+                   chunk_descriptor.write_order_queue.front());
+
+      if (chunk_descriptor.leased) {
         std::mutex mu;
 
-        /*Flush buffer then forward flush request*/
-
         std::vector<secondary_flush_request_args_t>
-            secondary_flush_request_args(3);
+            secondary_flush_request_args(write_context.flush_list.size());
 
         std::atomic<int> counter = write_context.flush_list.size();
+        MAINLOG_INFO("Flush list size: {}", write_context.flush_list.size());
 
         std::condition_variable cv;
-        bool done = false;
+        bool done = true;
 
         int args_i = 0;
 
         for (ChunkServerController &chunk_server_controller :
              write_context.flush_list) {
+          secondary_flush_request_args[args_i].req.set_write_id(
+              request->write_id());
           chunk_server_controller.Flush(secondary_flush_request_args[args_i],
                                         counter, mu, cv, done);
           ++args_i;
         }
 
         std::unique_lock<std::mutex> lock(mu);
-        cv.wait(lock, [&counter, &done] { return (counter == 0 and done); });
+        cv.wait(lock, [&counter, &done] {
+          MAINLOG_INFO("done: {}", (done ? "TRUE" : "FALSE"));
+          return (counter == 0 and done);
+        });
+        std::string file_path = chunk_server_->storage_folder_path_;
+        file_path.append(std::to_string(write_context.handle));
+        if (auto buffer_fr = chunk_server_->buffer_cache.find(write_id);
+            buffer_fr != chunk_server_->buffer_cache.end()) {
+          char *buffer = buffer_fr->second.data();
+          std::ofstream output_file;
+          output_file.open(file_path, std::ios::out);
+          output_file.write(buffer + 4, write_context.write_size - 4);
+        } else {
+          MAINLOG_ERROR("NO BUFFER");
+        }
+        MAINLOG_WARN("FILE PATH: {}", file_path);
+
+        MAINLOG_INFO("Data Flushed (lease:✔ )");
         response->set_status(GFSChunkServer::Status::SUCCESS);
         response->mutable_body()->set_acknowledgement(true);
-        auto *reactor = context->DefaultReactor();
-        reactor->Finish(grpc::Status::OK);
-        return reactor;
       } else {
+        std::string file_path = chunk_server_->storage_folder_path_;
+        file_path.append(std::to_string(write_context.handle));
+        if (auto buffer_fr = chunk_server_->buffer_cache.find(write_id);
+            buffer_fr != chunk_server_->buffer_cache.end()) {
+          char *buffer = buffer_fr->second.data();
+          std::ofstream output_file;
+          output_file.open(file_path, std::ios::out);
+          output_file.write(buffer + 4, write_context.write_size - 4);
+        } else {
+          MAINLOG_ERROR("NO BUFFER");
+        }
+        MAINLOG_WARN("FILE PATH: {}", file_path);
+        MAINLOG_INFO("Data Flushed");
         response->set_status(GFSChunkServer::Status::SUCCESS);
         response->mutable_body()->set_acknowledgement(true);
-        auto *reactor = context->DefaultReactor();
-        reactor->Finish(grpc::Status::OK);
-        return reactor;
       }
+      auto *reactor = context->DefaultReactor();
+      reactor->Finish(grpc::Status::OK);
+      return reactor;
     }
 
   private:
@@ -453,7 +574,7 @@ public:
       : chunkserver_master_connection_info_{config
                                                 .chunkserver_master_connection_info},
         storage_folder_path_{config.storage_file_path},
-        chunk_server_service_{this}, buffer_cache{8, 8096},
+        chunk_server_service_{this}, /*buffer_cache{8, 4096},*/
         master_stub_{GFSMaster::ChunkServerService::NewStub(
             grpc::CreateChannel(grpc_connection_string<rpc_server_descriptor_t>(
                                     chunkserver_master_connection_info_.master),
@@ -466,6 +587,13 @@ public:
         grpc::InsecureServerCredentials());
     builder.RegisterService(&chunk_server_service_);
     server_ = std::unique_ptr<grpc::Server>(builder.BuildAndStart());
+
+    for (auto dictionary_entry : chunk_dictionary_) {
+      MAINLOG_INFO("\nHandle: {}\n\tleased: {}\n\tsize: {}\n",
+                   dictionary_entry.first,
+                   (dictionary_entry.second.leased ? "TRUE" : "FALSE"),
+                   dictionary_entry.second.size);
+    }
   }
 
   void Announce() {
@@ -547,7 +675,7 @@ private:
 
   std::map<uint64_t, ChunkDescriptor> chunk_dictionary_;
   std::unordered_map<int, WriteContext> write_id_to_context_map_;
-  GFSLRUCache buffer_cache;
+  std::unordered_map<int, std::vector<char>> buffer_cache;
   std::string storage_folder_path_;
 
   /*LRUCache...
@@ -567,35 +695,92 @@ void tcp_server_worker(ChunkServer *chunk_server) {
 
   /*TCP Data Transfer Lambda*/
   tcp_server.wait([chunk_server](int socket) {
-    /*deserialize write id from stream and use it to get write context and issue
-     * an acknowldgement of data receipt*/
+    MAINLOG_WARN("#### HANDLING TCP TRANSMISSION ####");
 
-		char write_id_buffer[sizeof(int)];
-		recv(socket, write_id_buffer, 4, 0);
+    size_t total_bytes_received = 0;
+    int write_id = 0;
+    int recv_write_id_result = recv(socket, &write_id, sizeof write_id, 0);
 
-		MAINLOG_INFO("WRITE ID RECEIVED: {}", *(reinterpret_cast<int *>(write_id_buffer)));
-		/*
-    tcp_rpc_server_descriptor_t next_chunk_server =
-        chunk_server->chunkserver_master_connection_info_.chunk_server;
-    next_chunk_server.tcp_port++;
-
-
-    if (next_chunk_server.tcp_port < 6004) {
-      TCPClient client{next_chunk_server};
-      client.connectToServer();
+    if (recv_write_id_result < 0) {
+      MAINLOG_ERROR("Error: this is ");
+      return;
     }
 
-    rpc_server_descriptor_t client_server_info{"0.0.0.0", 4500};
-    std::unique_ptr<GFSClient::GFSClientService::Stub> client_stub =
-        GFSClient::GFSClientService::NewStub(
-            grpc::CreateChannel(grpc_connection_string(client_server_info),
-                                grpc::InsecureChannelCredentials()));
+    total_bytes_received = recv_write_id_result;
 
-    grpc::ClientContext context;
-    GFSClient::AcknowledgeDataReceiptRequest request;
-    GFSClient::AcknowledgeDataReceiptResponse response;
-    client_stub->AcknowledgeDataReceipt(&context, request, &response);
-		*/
+    MAINLOG_ERROR("recv_write_id_result: {}", recv_write_id_result);
+    MAINLOG_INFO("WRITE ID: {}", write_id);
+
+    WriteContext &write_context =
+        chunk_server->write_id_to_context_map_.find(write_id)->second;
+
+    char *buffer = chunk_server->buffer_cache[write_id].data();
+    // char *buffer = new char[4096];
+    // memcpy(buffer, &write_id, sizeof write_id);
+    memcpy(buffer, &write_id, sizeof(write_id));
+
+    MAINLOG_WARN("write_id 2: {}", *reinterpret_cast<int *>(buffer));
+
+    int buffer_size = write_context.write_size;
+
+    if (write_context.forward_to.ip.size() != 0) {
+      MAINLOG_INFO("I HAVE SERVER TO FORWARD TO: {}",
+                   write_context.forward_to.ip.size());
+      TCPClient forward_to_server_(write_context.forward_to);
+      forward_to_server_.connectToServer();
+
+      int bytes_sent = 0;
+
+      while (total_bytes_received < buffer_size) {
+        int recv_return = recv(socket, buffer + total_bytes_received,
+                               buffer_size - total_bytes_received, 0);
+        /*
+MAINLOG_WARN("************ recv return: {}, string received: {}, total "
+"string {}",
+recv_return, buffer + total_bytes_received, buffer);
+        */
+
+        MAINLOG_WARN("************ recv return: {}", recv_return);
+
+        if (recv_return < 0) {
+          MAINLOG_ERROR("Error receiving bytes");
+          break;
+        }
+
+        total_bytes_received += recv_return;
+
+        /*TODO: Fix send positions is forward offset by 4 bytes*/
+        while (bytes_sent < total_bytes_received) {
+          int send_return =
+              send(forward_to_server_.socket_, buffer + bytes_sent,
+                   total_bytes_received - bytes_sent, 0);
+
+          MAINLOG_WARN("send return: {}", send_return);
+          if (send_return < 0) {
+            MAINLOG_ERROR("Error sending bytes");
+            break;
+          }
+          bytes_sent += send_return;
+        }
+        bytes_sent = 0;
+      }
+    } else {
+      MAINLOG_INFO("I DON'T HAVE SERVER TO FORWARD TO: {}",
+                   write_context.forward_to.ip.size());
+      while (total_bytes_received < buffer_size) {
+        int recv_return = recv(socket, buffer + total_bytes_received,
+                               buffer_size - total_bytes_received, 0);
+        if (recv_return < 0) {
+          MAINLOG_ERROR("Error receiving bytes");
+          break;
+        }
+        total_bytes_received += recv_return;
+      }
+    }
+
+    // MAINLOG_WARN("ALL DATA HAVE BEEN WRITTEN: {}", buffer+4);
+    std::shared_ptr<ClientController> client_controller = write_context.client;
+    client_controller->AcknowledgeDataReceipt(write_id);
   });
 }
 
